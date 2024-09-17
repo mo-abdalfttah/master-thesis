@@ -1,0 +1,913 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 a whole story of CRC - `r params$Sample`"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+# library(OmnipathR)
+library(stringr)
+library(cowplot)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(reshape2)
+```
+
+```{r}
+generate_plots <- function(celltype, pathway_cell_scores) {
+  scores_cors <- lapply(seq_along(celltype), function(i) {
+    pathway_cell_scores %>%
+      group_by(pathway) %>%
+      nest() %>%
+      mutate(cor_res = map(data, function(x) { 
+        stest <- cor.test(x$path_score, x[[celltype[i]]])
+        return(broom::tidy(stest))
+      })) %>% 
+      dplyr::select(-data) %>%
+      unnest(cols = c(cor_res))
+  })
+  
+  scores_cors <- lapply(scores_cors, function(df) {
+    df %>%
+      ungroup() %>%
+      mutate(p.value = ifelse(p.value == 0, min(p.value), p.value)) %>%
+      mutate(corr_p.value = p.adjust(p.value)) %>%
+      mutate(logpvalue = -log10(corr_p.value))
+  })
+  
+  # Assign cell types column 
+  scores_cors <- map2(scores_cors, celltype, ~ mutate(.x, cell_type = .y))
+  
+  for (i in seq_along(scores_cors)) {
+    df <- scores_cors[[i]]
+    cell_type <- celltype[i]
+    
+    plot_title <- paste("Program:", cell_type)
+    
+    plot <- ggplot(df, aes(x = estimate,
+                           y = logpvalue,
+                           label = pathway)) +
+      geom_point() +
+      geom_text_repel() +
+      theme_classic() +
+      xlab("Pearson Correlation") +
+      ylab("-log10(corrected p-value)") +
+      ylim(c(0, 200)) +
+      xlim(-1, 1) +
+      ggtitle(plot_title)
+    
+    print(plot)
+  }
+}
+
+two_features_cor <- function(seurat_obj, geneA, geneB) {
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  
+  # Extract gene expression data
+  geneA_expr <- FetchData(seurat_obj, vars = geneA)
+  geneB_expr <- FetchData(seurat_obj, vars = geneB)
+  
+  # Combine the data into a single data frame
+  expr_data <- data.frame(GeneA = geneA_expr[[geneA]], GeneB = geneB_expr[[geneB]])
+  
+  # Compute the correlation and p-value
+  correlation_test <- cor.test(expr_data$GeneA, expr_data$GeneB, method = "pearson")
+  
+  # Handle the case where p.value is 0
+  p.value <- correlation_test$p.value
+  if (p.value == 0) {
+    p.value <- .Machine$double.eps
+  }
+  
+  # Create a dataframe to store the results
+  cor_results <- data.frame(
+    GeneA = geneA,
+    GeneB = geneB,
+    correlation = correlation_test$estimate,
+    p.value = p.value
+  )
+  
+  # Print the correlation coefficient and p-value
+  print(paste("Correlation coefficient between", geneA, "and", geneB, ":", cor_results$correlation))
+  print(paste("p-value:", cor_results$p.value))
+  
+  # Visualize the correlation
+  p <- ggplot(expr_data, aes(x = GeneA, y = GeneB)) +
+    geom_point() +
+    geom_smooth(method = "lm", col = "blue") +
+    labs(title = paste("Correlation between", geneA, "and", geneB, ":",
+                       round(cor_results$correlation, 2),
+                       "\n p-value:", signif(cor_results$p.value, 2)),
+         x = paste(geneA, "Expression"),
+         y = paste(geneB, "Expression")) +
+    theme_light()
+  
+  print(p)
+}
+
+```
+
+```{r}
+Sample <- params$Sample
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample = "ST.colon1"
+```
+
+# Define Functions
+
+```{r, warning=FALSE, message=FALSE}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+them_plot = theme(
+                text = element_text(size = 8),    
+                title = element_text(size = 8),    
+                axis.title = element_text(size = 8),
+                axis.text = element_text(size = 8), 
+                legend.title = element_text(size = 8),
+                legend.text = element_text(size = 8))
+
+SpatialFeaturePlotBlend <- function(object, features, combine = TRUE,
+                                    feature_1_alt_name = NULL,
+                                    feature_2_alt_name = NULL, assay = NULL,combine_name,
+                                    ...)  {
+  # Convert decimal number to hexadecimal. Pad with 0s if only a single
+  # character following conversion.
+  as_hex <- function(num) {
+    hex_str <- as.character(as.hexmode(num))
+    if (nchar(hex_str) == 1) {
+      hex_str <- paste0("0", hex_str)
+    }
+    
+    return(hex_str)
+  }
+  
+  metadata_to_hexadecimal <- function(in_dat) {
+    apply(in_dat, 2,
+          function(x) {
+            # Make minimum 0
+            x - min(x)
+          }) %>%
+      apply(2,
+            function(x) {
+              # Constrain to range [0, 255]
+              round(255 * (x / max(x)))
+            }) %>%
+      apply(1,
+            function(x) {
+              # Convert to hexadecimal codes
+              toupper(paste0("#", as_hex(x[1]), as_hex(x[2]), "00"))
+            })
+  }
+  
+  if (length(features) != 2) {
+    stop(paste(c("Incorrect number of features. ",
+                 "Requires two features, received ",
+                 length(features))))
+  }
+  
+  if (!is.null(assay)) {
+    DefaultAssay(object) <- assay
+  }
+  
+  blend_plot_theme <- theme(legend.position = "none",
+                            plot.title = element_text(hjust = 0.5))
+  
+  plot_list_outer <- list()
+  
+  object$image_id <- unlist(lapply(Images(object),
+                                   function(x) {
+                                     rep(x, nrow(object[[x]]@coordinates))
+                                   }))
+  
+  
+  for (i in Images(object)) {
+    plot_list <- lapply(features,
+                        function(feature) {
+                          max_color <- ifelse(feature == features[1],
+                                              "#FF0000", "#00FF00")
+                          SpatialFeaturePlot(object, feature,crop = F,
+                                             images = i, ...) +
+                            scale_fill_gradient(low = "#000000",
+                                                high = max_color) +
+                            ggtitle(feature) +
+                            blend_plot_theme
+                        })
+    
+    cells_obj_sub <- subset(object, image_id == i)
+    dat <- FetchData(cells_obj_sub, features)
+    colors <- as.matrix(dat) %>% metadata_to_hexadecimal()
+    
+    #new_md_column <- paste0(features[1], "_vs_", features[2])
+    new_md_column <- combine_name
+    cells_obj_sub[[new_md_column]] <- colors
+    names(colors) <- as.character(colors)
+    Idents(cells_obj_sub) <- cells_obj_sub[[new_md_column]]
+    plot_list[[3]] <- SpatialDimPlot(cells_obj_sub,crop = F,
+                                     cols = colors, images = i, ...) +
+      ggtitle(paste0(features[1], "_", features[2])) +
+      blend_plot_theme + NoLegend()
+    
+    side_length <- 100
+    legend_grid <- expand.grid(seq(from = min(dat[, features[1]]),
+                                   to = max(dat[, features[1]]),
+                                   length.out = side_length),
+                               seq(from = min(dat[, features[2]]),
+                                   to = max(dat[, features[2]]),
+                                   length.out = side_length))
+    colnames(legend_grid) <- features
+    legend_colors <- metadata_to_hexadecimal(legend_grid)
+    legend_grid$color <- legend_colors
+    names(legend_colors) <- legend_colors
+    
+    legend <- ggplot(legend_grid,
+                     aes(x = .data[[features[1]]], y = .data[[features[2]]],
+                         color = color)) +
+      geom_point(shape = 15, size = 1.9) +
+      scale_color_manual(values = legend_colors) +
+      coord_cartesian(expand = FALSE) +
+      theme(legend.position = "none", aspect.ratio = 1,
+            panel.background = element_blank(),
+            axis.text.x = element_text(angle = 45, hjust = 1)) +
+      xlab(ifelse(is.null(feature_1_alt_name),
+                  features[1], feature_1_alt_name)) +
+      ylab(ifelse(is.null(feature_2_alt_name),
+                  features[2], feature_2_alt_name))
+    
+    plot_list[[4]] <- wrap_plots(ggplot() + theme_void(), legend,
+                                 ggplot() + theme_void(), ncol = 1,
+                                 heights = c(0.2, 0.6, 0.2))
+    
+    plot_list_outer[[i]] <- plot_list
+  }
+  
+  if (combine == FALSE) {
+    return(plot_list_outer)
+  } else {
+    plot_list_outer <- lapply(plot_list_outer,
+                              function(p) {
+                                wrap_plots(p, nrow = 1,
+                                           widths = c(0.28, 0.28,
+                                                      0.28, 0.16))
+                              })
+    p <- wrap_plots(plot_list_outer, ncol = 1)
+    
+    return(p)
+  }
+}
+
+
+```
+
+# Read Files
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+# Annotation 
+
+```{r}
+Idents(Data) <- Data$SCT_snn_res.0.5
+annot <- unique(Data$SCT_snn_res.0.5)
+pal <- ggsci::pal_igv()(length(annot))
+names(pal) <- annot
+
+DimPlot(Data,cols = ggsci::pal_igv()(50))
+p = SpatialDimPlot(Data, crop = F) + 
+  guides(fill = guide_legend(override.aes = list(size=10))) + 
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+"{vis}/for_presentation/Clustering_{Sample}.png" %>%
+  glue::glue() %>%
+  here::here() %>%
+  ggsave(filename = ., plot = p, width = 7, height = 7) 
+p
+```
+
+# Map marker Genes 
+
+```{r}
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        annotation_lvl1 = dplyr::case_when(
+            SCT_snn_res.0.5 == 0 ~ "unknown",
+            SCT_snn_res.0.5 == 1 ~ "Tumor_1",
+            SCT_snn_res.0.5 == 2 ~ "Tumor_2",
+            SCT_snn_res.0.5 == 3 ~ "Normal-Epithelial",
+            SCT_snn_res.0.5 == 4 ~ "Tumor_3",
+            SCT_snn_res.0.5 == 5 ~ "TME",
+            SCT_snn_res.0.5 == 6 ~ "Tumor_4",
+
+            )
+        )
+
+```
+
+```{r}
+Idents(Data) <- Data$annotation_lvl1
+annot <- unique(Data$annotation_lvl1)
+pal <- c("#CE3D32FF", # red - 1 - Tumor_1
+         "#5050FFFF", # Blue - 0 - unknown
+          "#466983FF", # Dark - 4 - Tumor_3
+         "#BA6338FF", # Brown -5 - TME
+         "#749B58FF", # green - 2- Tumor_2
+          "#F0E685FF", # Yellow - 3 - Normal-Epithelial
+         "#5DB1DDFF" # Whte blue - 6 - Tumor_4
+         )
+names(pal) <- annot
+
+
+DimPlot(Data, cols = pal)
+p <- SpatialDimPlot(Data, crop = F) + 
+  guides(fill = guide_legend(override.aes = list(size=10))) + 
+  scale_fill_manual(values = pal)
+
+"{vis}/for_presentation/Annotation_{Sample}.png" %>%
+  glue::glue() %>%
+  here::here() %>%
+  ggsave(filename = ., plot = p, width = 7, height = 7) 
+p
+```
+
+```{r, fig.width=15, fig.height=5}
+DefaultAssay(Data) <- "SCT"
+
+p <- VlnPlot(Data, group.by = "annotation_lvl1", cols = pal, features = c(
+  "MUC2", "SPINK4","KRT20"
+), pt.size = 0) & 
+    stat_summary(fun.y = median, geom='point', size = 10, colour = "black", shape = 95) & them_plot
+
+"{vis}/for_presentation/Normal_Markers_{Sample}.png" %>%
+  glue::glue() %>%
+  here::here() %>%
+  ggsave(filename = ., plot = p, width = 10, height = 5) 
+p
+```
+
+```{r, fig.width=15, fig.height=5}
+p <- VlnPlot(Data, group.by = "annotation_lvl1", cols = pal, features = c(
+  "CXCL14", "CD74", "CD4"
+), pt.size = 0) & 
+    stat_summary(fun.y = median, geom='point', size = 10, colour = "black", shape = 95) & them_plot
+"{vis}/for_presentation/TME_Markers_{Sample}.png" %>%
+  glue::glue() %>%
+  here::here() %>%
+  ggsave(filename = ., plot = p, width = 10, height = 5) 
+p
+```
+
+```{r}
+p <- VlnPlot(Data, group.by = "annotation_lvl1", cols = pal, features = c(
+"IFI6", "EMP1", "KRT20"
+), pt.size = 0) & 
+    stat_summary(fun.y = median, geom='point', size = 10, colour = "black", shape = 95) & them_plot
+
+"{vis}/for_presentation/Tumor_Markers_{Sample}.png" %>%
+  glue::glue() %>%
+  here::here() %>%
+  ggsave(filename = ., plot = p, width = 10, height = 5) 
+p
+
+```
+
+```{r}
+VlnPlot(Data, group.by = "annotation_lvl1", cols = pal, features = c(
+  "REG1A", "REG3A", 
+  "ISG15", "IFI6",
+  "MUC2", "SPINK4",
+  "BNIP3", "PLAAT3",
+  "COL3A1", "VIM", "ACTA2", "CXCL14", "CD74", "CD4",
+  "EMP1", "KRT20"
+), pt.size = 0) & 
+    stat_summary(fun.y = median, geom='point', size = 10, colour = "black", shape = 95) & them_plot
+```
+
+# Normal Niches 
+
+## Deconvloution 
+
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("Normal.Epi_lvl1"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako")
+
+```
+
+## Topics 
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "mouse_sig"
+p2 <- SpatialFeaturePlot(Data, features = c("Topic_10", "Topic_4"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "A")
+p2
+```
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "mouse_sig"
+SpatialFeaturePlot(Data, features = c("Goblet-Smillie", "Enterocytes-Smillie"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "E", limits = c(0, NA))
+```
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "SCT"
+p4 <- SpatialFeaturePlot(Data, features =  c( "PLA2G2A", "MUC2", "KRT20"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "C", limits = c(0, NA))
+p4
+```
+
+```{r, fig.width=10, fig.height=7}
+DefaultAssay(Data) <- "SCT"
+VlnPlot(Data, features = c("Normal.Epi_lvl1","Topic_10", "Topic_4", "Goblet-Smillie", "Enterocytes-Smillie","PLA2G2A", "MUC2",  "KRT20"),
+        group.by = "annotation_lvl1", cols = ggsci::pal_igv()(50), pt.size = 0, ncol = 4) & 
+    stat_summary(fun.y = median, geom='point', size = 5, colour = "black", shape = 95) & them_plot
+```
+
+# CMS Classfication 
+
+iCMS3 either MSS or MSI (Mainly MSI)
+iCMS2 is MSS (i2_MSS_F) meaning it is Fibrotic Tumor and the stroaml cells and Fipropblast infiltrated
+
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("iCMS2", "iCMS3"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "E", limits = c(0, NA))
+```
+
+```{r, fig.width=10, fig.height=5}
+VlnPlot(Data, features = c("iCMS2", "iCMS3"),
+        group.by = "annotation_lvl1", cols = ggsci::pal_igv()(50), pt.size = 0.001) & 
+    stat_summary(fun.y = median, geom='point', size = 10, colour = "black", shape = 95) & them_plot
+```
+
+
+# Prolifrative Niches 
+
+## Deconv 
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("TP6_lvl2"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA))
+
+```
+
+## Signature 
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("Proliferation"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "E", limits = c(0, NA))
+```
+
+## Genes
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("MKI67", "TOP2A"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "C", limits = c(0, NA))
+
+```
+
+```{r, fig.width=10, fig.height=4}
+
+VlnPlot(Data, features = c("Proliferation", "TP6_lvl2", "MKI67", "TOP2A"),
+        group.by = "annotation_lvl1", cols = ggsci::pal_igv()(50), pt.size = 0, ncol = 2) & 
+    stat_summary(fun.y = median, geom='point', size = 5, colour = "black", shape = 95) & them_plot
+```
+
+# Stem Cells
+
+## Deconvloution 
+
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("TP4_lvl2"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako", limits = c(0.00000001, NA))
+```
+
+## Signatures 
+
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("LGR5-Munoz"),
+                   ncol =3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "E", limits = c(0, NA))
+```
+
+## Genes 
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "SCT"
+SpatialFeaturePlot(Data, features = c("LGR5","magic_LGR5"),
+                   ncol =3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "C", limits = c(0, NA))
+```
+
+
+```{r, fig.width=10, fig.height=4}
+VlnPlot(Data, features = c("TP4_lvl2", "LGR5-Munoz", "LGR5","magic_LGR5"),
+        group.by = "annotation_lvl1", cols = ggsci::pal_igv()(50), pt.size = 0, ncol = 2) & 
+    stat_summary(fun.y = median, geom='point', size = 10, colour = "black", shape = 95) & them_plot
+```
+
+
+# Diffrentiated Cancers and HRCs
+
+## Deconvloution
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("TP2_lvl2", "Myeloid_lvl1"),
+                   ncol = 3,
+                   alpha = c(-0.1, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA))
+
+```
+
+## Signatures 
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("EpiHR-curated", "CorHRC"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "E", limits = c(0, NA))
+
+```
+
+## Genes
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "SCT"
+SpatialFeaturePlot(Data, features = c("magic_EMP1","magic_KRT20", "magic_SPP1", "magic_FAP"),
+                   ncol = 4,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "C", limits = c(0, NA))
+
+SpatialFeaturePlot(Data, features = c("magic_C1QA", "C1QA"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & scale_fill_viridis_c(option = "C", limits = c(0, NA))
+
+```
+
+## Pathwasy
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "pathwmean"
+SpatialFeaturePlot(Data, features = c("JAK-STAT"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "D")
+```
+
+```{r, fig.width=15, fig.height=4}
+DefaultAssay(Data) <- "SCT"
+
+VlnPlot(Data, features = c("Myeloid_lvl1", "EpiHR-curated", "EpiHR", "CorHRC", "EMP1","magic_SPP1", "TP2_lvl2", "JAK-STAT"),
+        group.by = "annotation_lvl1", cols = ggsci::pal_igv()(50), pt.size = 0, ncol = 8) & 
+    stat_summary(fun.y = median, geom='point', size = 5, colour = "black", shape = 95) & them_plot
+```
+
+# TME - Stomal and Immune
+
+## Deconvloution 
+```{r, fig.width=10, fig.height=10}
+SpatialFeaturePlot(Data, features = c("Strom_lvl1", "T.CD4_lvl1", "Myeloid_lvl1", "CAF.CXCL14._lvl2"),
+                   ncol = 3,
+                   alpha = c(-0.5, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA))
+```
+
+## Topics  
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("Topic_5"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99")  &
+  scale_fill_viridis_c(option = "A")
+```
+
+# Pathways
+```{r, fig.width=10}
+DefaultAssay(Data) <- "pathwmean"
+SpatialFeaturePlot(Data, features = c("NFkB", "TNFa", "TGFb"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "D", limits = c(0, NA))
+```
+
+
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("YAP-induced-Gregorieff", "Fetal-Mustata"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "E", limits = c(0, NA))
+```
+
+
+```{r, fig.width=20, fig.height=10}
+VlnPlot(Data, features = c("Strom_lvl1", "CAF.CXCL14._lvl2","T.CD4_lvl1", "Myeloid_lvl1",
+                           "NFkB", "TNFa", "TGFb", 
+                           "Topic_5",
+                           "YAP-induced-Gregorieff", "Fetal-Mustata"), 
+        group.by = "annotation_lvl1", cols = ggsci::pal_igv()(50),
+        pt.size = 0, ncol = 10) & 
+    stat_summary(fun.y = median, geom='point', size = 5, colour = "black", shape = 95) & them_plot
+```
+
+# Immune Cells
+
+## Deconvloution 
+```{r, fig.width=10, fig.height=10}
+SpatialFeaturePlot(Data, features = c("T.CD4_lvl1", "T.CD8_lvl1", "Myeloid_lvl1", "B_lvl1", "Strom_lvl1"),
+                   ncol = 4,
+                   alpha = c(-0.5, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA))
+```
+
+## Topics  
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("Topic_5"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99")  &
+  scale_fill_viridis_c(option = "A")
+```
+
+# Pathways
+```{r, fig.width=10}
+DefaultAssay(Data) <- "pathwmean"
+SpatialFeaturePlot(Data, features = c("NFkB", "TNFa", "TGFb"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "D", limits = c(0, NA))
+```
+
+
+```{r, fig.width=10}
+SpatialFeaturePlot(Data, features = c("YAP-induced-Gregorieff", "Fetal-Mustata"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "E", limits = c(0, NA))
+```
+
+
+```{r, fig.width=20, fig.height=10}
+VlnPlot(Data, features = c("T.CD4_lvl1", "T.CD8_lvl1", "Myeloid_lvl1", "B_lvl1", "Strom_lvl1",
+                           "NFkB", "TNFa", "TGFb"), 
+        group.by = "annotation_lvl1", cols = ggsci::pal_igv()(50),
+        pt.size = 0, ncol = 4) & 
+    stat_summary(fun.y = median, geom='point', size = 5, colour = "black", shape = 95) & them_plot
+```
+
+
+
+# Comination plots 
+
+# Stromal 
+
+## Cancer cells
+
+```{r, fig.width=20, fig.height=10}
+Seurat::DefaultAssay(Data) <- "SCT"
+SpatialFeaturePlotBlend(object = Data, features = c("Strom_lvl1", "TP5_lvl2"), combine = T, combine_name = "Strom_lvl1_vs_TP5_lvl2")
+```
+
+## TGFb
+
+```{r, fig.width=20, fig.height=10}
+DefaultAssay(Data) <- "pathwmean"
+SpatialFeaturePlotBlend(object = Data, features = c("Strom_lvl1", "TGFb"), combine = T, combine_name = "Strom_lvl1_vs_TGFb")
+```
+
+```{r, fig.width=20, fig.height=10}
+DefaultAssay(Data) <- "SCT"
+SpatialFeaturePlotBlend(object = Data, features = c("TGFb", "COL1A1"), combine = T, combine_name = "TGFb_vs_COL1A1")
+```
+
+```{r, fig.width=20, fig.height=10}
+SpatialFeaturePlot(Data, features = c("Strom_lvl1", "TGFb", "Myeloid_lvl1"), crop = F, ncol = 3)
+```
+
+
+```{r}
+SpatialFeaturePlotBlend(object = Data, features = c("magic_SPP1", "magic_FAP"), combine = T, combine_name = "magic_SPP1_vs_magic_FAP")
+SpatialFeaturePlotBlend(object = Data, features = c("Myeloid_lvl1", "TP2_lvl2"), combine = T, combine_name = "SPP1_vs_EMP1")
+
+```
+
+```{r, fig.width=20, fig.height=20}
+chemokine_genes <- c(
+  "CCL1", "CCL11", "CCL22", "CCL2", "CCL19", "CCL17",
+  "CCL14", "CCL13", "CCL7", "CCL5", "CCL4", "CCL3L3",
+  "CCL3", "CCL8", "CXCL10", "CXCL11", "CXCL12", "CXCL13",
+  "CXCL3", "CXCL2", "CXCL16", "CXCL9", "CXCL6", "CXCL5"
+)
+SpatialFeaturePlot(Data, features = chemokine_genes, crop = F, max.cutoff = "q95")
+```
+
+```{r, fig.width=20, fig.height=20}
+chemokine_receptors <- c(
+  "CCR1", "CCR8", "CCR7", "CCR6", "CCR5", "CCR4",
+  "CXCR5", "CXCR4", "CXCR3", "CXCR2", "CCRL2", "CXCR6"
+)
+SpatialFeaturePlot(Data, features = chemokine_receptors, crop = F, max.cutoff = "q95")
+
+```
+
+```{r, fig.width=20, fig.height=20}
+genes_of_interest <- c(
+  "HLA-G", "IFNG", "IL13", "CCL3", "ANGPT4", "CCL7", "ANGPT2",
+  "IL1B", "SOST", "ANGPT1", "IL4", "CCL2", "IFNB1", "TNF", "IL6",
+  "IL34", "CEACAM1", "CXCL6", "GAST", "CXCL3"
+)
+SpatialFeaturePlot(Data, features = genes_of_interest, crop = F, max.cutoff = "q95")
+
+```
+
+```{r}
+SpatialFeaturePlot(Data, features = c("magic_SPP1", "magic_FAP", "magic_CXCL10", "magic_EMP1", "magic_CCL2"), crop = F, max.cutoff = "q95")
+```
+
+
+# Correlation Plots
+```{r, fig.width=10, fig.height=10}
+cell_topic <- t(as.data.frame(Data@assays$mouse_sig@data))
+cell_pathway <- t(as.data.frame(Data@assays$pathwmean@data))
+correlation_spots <- cor(as.data.frame(cell_topic), as.data.frame(cell_pathway))
+pheatmap::pheatmap(correlation_spots, color = rev(magma(50)))
+```
+
+# Correlation Between Signatures and Proginey Pathways
+
+```{r}
+progeny <- as.data.frame(Data@assays$pathwmean@data) %>%
+  rownames_to_column("pathway") %>%
+  pivot_longer(-pathway, 
+               names_to = "cell_type",
+               values_to = "path_score")
+
+signature <- as.data.frame(Data@assays$mouse_sig@data) %>% t() 
+signature <- as.data.frame(signature)                                
+# Extract names of cells
+variable <- colnames(signature)
+signature <-  signature %>% rownames_to_column("cell_type")
+```
+
+```{r}
+merged_scores <- left_join(progeny, signature)
+head(merged_scores)
+```
+
+```{r}
+generate_plots(celltype = variable, pathway_cell_scores = merged_scores)
+```
+
+# Correlation between Signatures and Deconvloution 
+
+```{r}
+ct <- colnames(Data@meta.data)[str_detect(colnames(Data@meta.data), "lvl1")]
+# remove first and last three values since they are not celltypes 
+ct <- ct[-1]
+ct <- ct[-((length(ct)-2):length(ct))]
+
+deconv <- Data@meta.data %>% select(all_of(ct))
+deconv$cell_type <- rownames(deconv)
+deconv <- melt(deconv, id.vars = "cell_type")
+colnames(deconv) <- c("cell_type", "pathway", "path_score")
+```
+
+```{r}
+merged_scores <- left_join(signature, deconv)
+head(merged_scores)
+```
+
+```{r}
+generate_plots(celltype = variable, pathway_cell_scores = merged_scores)
+```
+
+# Correlation between Progieny pathways and Deconvloution 
+
+```{r}
+progeny <- as.data.frame(Data@assays$pathwmean@data) %>% t() 
+progeny <- as.data.frame(progeny)                                
+# Extract names of cells
+variable <- colnames(progeny)
+progeny <-  progeny %>% rownames_to_column("cell_type")
+
+merged_scores <- left_join(progeny, deconv)
+head(merged_scores)
+```
+
+```{r}
+generate_plots(celltype = variable, pathway_cell_scores = merged_scores)
+```
+
+# Genes Correlation
+
+```{r}
+DefaultAssay(Data) <- "MAGIC"
+correlation_analysis(seurat_obj = Data, geneA = "SPP1", geneB = "FAP")
+correlation_analysis(seurat_obj = Data, geneA = "CCR1", geneB = "CXCL10")
+```
+
+```{r}
+sessionInfo()
+```
+

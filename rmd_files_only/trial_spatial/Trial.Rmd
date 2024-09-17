@@ -1,0 +1,222 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-06-10"
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(presto)
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+object <- Seurat::Load10X_Spatial(data.dir = "P1/", bin.size = c(16))
+```
+
+```{r}
+DefaultAssay(object) <- "Spatial.016um"
+```
+
+```{r}
+VlnPlot(object, features = c("nCount_Spatial.016um", "nFeature_Spatial.016um"), pt.size = 0, raster=FALSE)
+SpatialFeaturePlot(object, features = "nCount_Spatial.016um")
+```
+
+# Preprocessing 
+```{r}
+object <- NormalizeData(object)
+object <- FindVariableFeatures(object)
+object <- ScaleData(object)
+```
+
+# SketchData - subsampled cells
+
+```{r}
+# we select 50,0000 cells and create a new 'sketch' assay
+object <- SketchData(
+  object = object,
+  ncells = 50000,
+  method = "LeverageScore",
+  sketched.assay = "sketch"
+)
+```
+
+```{r}
+DefaultAssay(object) <- "sketch"
+```
+
+```{r}
+# perform clustering workflow
+object <- FindVariableFeatures(object)
+object <- ScaleData(object)
+object <- RunPCA(object, assay = "sketch", reduction.name = "pca.sketch")
+object <- FindNeighbors(object, assay = "sketch", reduction = "pca.sketch", dims = 1:50)
+object <- FindClusters(object, resolution = c(0.5, 1, 1.5, 2))
+object <- RunUMAP(object, reduction = "pca.sketch", reduction.name = "umap.sketch", return.model = T, dims = 1:50)
+
+```
+
+Restore the data 
+
+```{r}
+object <- ProjectData(
+  object = object,
+  assay = "Spatial.016um",
+  full.reduction = "full.pca.sketch",
+  sketched.assay = "sketch",
+  sketched.reduction = "pca.sketch",
+  umap.model = "umap.sketch",
+  dims = 1:50,
+  refdata = list(seurat_cluster.projected = "sketch_snn_res.1")
+)
+```
+
+```{r, fig.width=10, fig.height=10}
+DefaultAssay(object) <- "sketch"
+Idents(object) <- "sketch_snn_res.1"
+DimPlot(object, reduction = "umap.sketch", label = F)
+```
+
+```{r, fig.width=10, fig.height=10}
+DefaultAssay(object) <- "Spatial.016um"
+Idents(object) <- "seurat_cluster.projected"
+DimPlot(object, reduction = "full.umap.sketch", label = F, raster=FALSE) 
+```
+
+```{r, fig.width=10, fig.height=10}
+SpatialDimPlot(object, label = T, repel = T, label.size = 4)
+```
+
+```{r, fig.width=20, fig.height=20}
+Idents(object) <- "seurat_cluster.projected"
+cells <- CellsByIdentities(object, idents = c(0:25))
+p <- SpatialDimPlot(object,
+  cells.highlight = cells[setdiff(names(cells), "NA")],
+  cols.highlight = c("#FFFF00", "grey50"), facet.highlight = T, combine = T
+) + NoLegend()
+p
+```
+
+```{r}
+# Crete downsampled object to make visualization either
+object_subset <- subset(object, cells = Cells(object[["Spatial.016um"]]), downsample = 1000)
+object_subset <- BuildClusterTree(object_subset, assay = "Spatial.016um", reduction = "full.pca.sketch", reorder = T)
+markers <- FindAllMarkers(object_subset, assay = "Spatial.016um", only.pos = TRUE)
+
+
+markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 5) %>%
+  ungroup() -> top5
+
+object_subset <- ScaleData(object_subset, assay = "Spatial.016um", features = top5$gene)
+p <- DoHeatmap(object_subset, assay = "Spatial.016um", features = top5$gene, size = 2.5) + theme(axis.text = element_text(size = 5.5)) + NoLegend()
+p
+```
+
+```{r, fig.width=20, fig.height=20}
+SpatialFeaturePlot(object, features = c("EPCAM", "REG1A", "REG1B", "CEACAM6", "TGFBI", "FCGBP", "MUC2", "COL11A1", "EMP1", "SPP1", "C1QA"))
+
+genes <- c("EPCAM", "KRT18", 
+  "PTPRC","CD3E", "CD4", "CD8A",  # T cells
+  "NKG7", "NCR1", "NCR3",   # NK                   
+  "CD19", "MS4A1",        # B cells
+  "DCN", "FAP", "ENG", # Stromal cells
+  "SDC1",         # Plasma cells
+  "CD14", "LYZ", "CD1C", "ITGAX", "FCGR1A", # Myeloid cells
+  "KIT", "TPSAB1", "TPSB2",  # MAST
+  "VWF", "VIM", # Enothilial Cells
+  "MZB1", # Plasma
+  "CSPG4", "RGS5", # Pericytes
+  "ACTA2", "MYH11", "TAGLN", "CNN1", "DES", # smooth muscle cells (SMCs)
+  "NRXN1", "LGI4", "PCSK1N", "L1CAM", "CRYAB" # Neuron
+  ) 
+FeaturePlot(object, features = genes, max.cutoff = "q95") + DimPlot(object, cols = ggsci::pal_igv()(50))
+
+```
+
+# Map Signatures
+
+```{r}
+library(tidyverse)
+mouse_Signture = "{sig_sp}/mouse_signatures.rds" %>% 
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+sig_list<- list()
+for (i in seq_along(mouse_Signture)) {
+    sig_list[[i]] = data.frame(target = mouse_Signture[[i]],
+                        source = rep(names(mouse_Signture[i]),
+                                     length(mouse_Signture[[i]])),
+                        weight = 1)
+    sig_list[[i]] = drop_na(sig_list[[i]])
+    colnames(sig_list[[i]]) = c("target", "source", "weight")
+    sig_list[[i]]$target <- str_to_upper(sig_list[[i]]$target)
+    sig_list[[i]] <- sig_list[[i]][!duplicated(sig_list[[i]]$target),]
+}
+
+mouse_Signture = bind_rows(sig_list)
+```
+
+```{r}
+acts <- run_wmean(
+    mat=object@assays$Spatial.016um$data,
+    net=mouse_Signture,
+    .source='source',
+    .target='target',
+    .mor='weight',
+    times = 100,
+    minsize = 5)
+#acts$score <- clip.data(acts$score, lower = 0.01, upper = 0.99)
+```
+
+```{r}
+"{sig_sp}/{robj_dir}/mouse_sig_acts_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = acts)
+```
+
+```{r}
+Data = Handle_Fun(acts_res = acts, object = Data, assay_name = "mouse_sig")
+```
+
+### Signture Visulization
+
+```{r, fig.width=30, fig.height=30}
+FeaturePlot(Data, features = rownames(Data@assays$mouse_sig)) & theme_plot
+```
+
+```{r, fig.height=30, fig.width=30}
+VlnPlot(Data, features = rownames(Data@assays$mouse_sig), pt.size = 0, group.by = "annotation_lvl1", cols = cols) & 
+    stat_summary(fun.y = median, geom='point', size = 6, colour = "black", shape = 95)  & theme_plot
+```
+
+```{r fig.height=10, fig.width=20}
+ct <- rownames(Data@assays$mouse_sig)
+
+# Number of features in 'ct'
+num_features <- length(ct)
+
+# Loop through 'ct' in steps of 4
+for (i in seq(1, num_features, by = 4)) {
+    # Select a subset of 4 features (or fewer if at the end of the list)
+    selected_features <- ct[i:min(i+3, num_features)]
+    
+    # Run SpatialFeaturePlot with the selected features
+    print(SpatialFeaturePlot(
+        Data, crop = FALSE,
+        features = selected_features, ncol = 4,
+        alpha = c(0, 1),
+        max.cutoff = "q95"
+    ) & scale_fill_viridis_c())
+}
+```

@@ -1,0 +1,518 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "Signtures of Single Cell Analysis of Tumor cells"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+NOTE: This script should run n R version (4.3) and  Bioconductor version (3.17) Becouse signifinder work only with them
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+Analysis_Fun = function(Object, res){
+  Object <- SCTransform(Object, assay = "Spatial", verbose = FALSE, return.only.var.genes = F) %>%
+  #Object <- Seurat::NormalizeData(Object, verbose = FALSE) %>%
+  #Seurat::FindVariableFeatures(selection.method = "vst", nfeatures = 3000) %>%
+  #Seurat::ScaleData(verbose = FALSE) %>% 
+  Seurat::RunPCA(verbose = FALSE) %>%
+  Seurat::FindNeighbors(reduction = "pca", dims = 1:30) %>%
+  Seurat::FindClusters(verbose = FALSE, res = res) %>%
+  Seurat::RunUMAP(reduction = "pca", dims = 1:30)
+  
+  
+  return(Object)
+
+}
+
+Handle_Fun = function(acts_res, object, assay_name){
+  object[[assay_name]] <- acts_res %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+  DefaultAssay(object = object) <- assay_name
+  return(object)
+}
+
+# This function To visualize the gene expression of each gene in each signature, 
+# it is Build to work with Decouple formats
+# object = Seurat Object After running DecoupleR, it should contain both gene expression assay (Spatial or RNA) and signature assay (assay contain the score of each signature in each cell/spot)
+# signature_table = it is the input of net argument in DecoupleR, it should contain two column: 1- Source (Signature name) 2- target (Gene names) 
+# expr_slot = the slot of Seurat object gene expression matrix, it can be c("data", "scale.data", "counts")
+# expr_assay = the assay of Seurat object, it can be c("Spatial", "RNA")
+# expr_cols = color of gene expression values in the heat map (Default magma(100))
+# sig_name = Signature name you want to visualize its genes in the Heatmap (The name should be the same in Seurat object and in signature_table)
+# sig_assay = The name of the signature assay in Seurat object (Usual the user name in when run DecoupleR)
+
+Signture_HeatMap <- function(object, signture_table, expr_slot, expr_assay, sig_name, sig_assay, 
+                             expr_cols = magma(100), meta_col = NULL) {
+    # Extract Gene Expression Matrix from Seurat Object
+    gene_expr <- GetAssayData(object, assay = expr_assay, slot = expr_slot)
+    # Subset the genes of the signature from the Gene Expression Matrix
+    genes_of_interest <- signture_table$target[which(signture_table$source %in% sig_name)]
+    gene_expr <- gene_expr[rownames(gene_expr) %in% genes_of_interest, ]
+
+    # Extract the Score of the Signature of interest
+    Sig_assay <- GetAssayData(object, assay = sig_assay)
+    Sig <- Sig_assay[sig_name,]
+    anno <- data.frame(Score = Sig)
+    anno$Score[is.infinite(anno$Score)] <- 0
+
+    # Initialize the list for heatmap annotations
+    heatmap_annotations <- list(Score = colorRamp2(c(0, max(anno$Score, na.rm = TRUE)), c("black", "#00F5FF")))
+
+    # Check if meta_col is provided and exists in metadata
+    if (!is.null(meta_col) && meta_col %in% colnames(object@meta.data)) {
+        meta_data <- object@meta.data[, meta_col, drop = FALSE]
+        # Combine the metadata with the annotation
+        anno <- cbind(anno, meta_data)
+
+        # Generate colors for meta_col
+        unique_values <- unique(meta_data[[meta_col]])
+        meta_col_colors <- ggsci::pal_igv()(length(unique_values))
+        names(meta_col_colors) <- unique_values
+
+        # Add the meta_col colors to the annotations
+        heatmap_annotations[[meta_col]] <- meta_col_colors
+    }
+
+    # Add the score of the signature as annotation in the heatmap
+    colAnn <- HeatmapAnnotation(df = anno,
+                                which = 'column',
+                                col = heatmap_annotations)
+    
+    # Visualize the Heatmap with the genes and signature
+    ht <- Heatmap(as.matrix(gene_expr),
+                  name = "Gene Expression",
+                  col = expr_cols,
+                  cluster_rows = TRUE,
+                  cluster_columns = TRUE,
+                  column_title = sig_name,
+                  column_names_gp = gpar(fontsize = 14),
+                  show_column_names = FALSE,
+                  top_annotation = colAnn)
+    draw(ht)
+}
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(glue)
+library(here)
+library(Seurat)
+library(ggplot2)
+library(harmony)
+library(decoupleR)
+library(dplyr)
+library(viridis)
+library(ComplexHeatmap)
+library(circlize)
+
+#library(fsbrain)
+cols <- ggsci::pal_igv()(50)
+```
+
+
+```{r}
+theme_plot <- theme(text = element_text(size = 8),    
+      title = element_text(size = 8),    
+      axis.title = element_text(size = 8),
+      axis.text = element_text(size = 8), 
+      legend.title = element_text(size = 8),
+      legend.text = element_text(size = 8))
+```
+
+```{r, echo=FALSE}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+#Sample = "SN123_A595688_Rep1"
+Sample <- params$Sample
+Path <- "{magic_sp}/{robj_dir}/magic_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here()
+```
+
+```{r, warning=FALSE, message=FALSE}
+Data <- readRDS(Path)
+DefaultAssay(Data) <- "SCT"
+Data
+Data <- Analysis_Fun(Object = Data, res = c(0.2))
+```
+
+# Signture Analysis
+
+## Cancer cell states NatGen Paper
+
+We will use the cancer signrue provided in this paper https://www.nature.com/articles/s41588-022-01141-9
+
+```{r, eval=FALSE}
+Signture = "{sig_sp}/Cancer_signture.xlsx" %>% 
+    glue::glue() %>%
+    here::here() %>%
+    readxl::read_xlsx(sheet = 3)
+colnames(Signture) = Signture[2,]
+Signture = Signture[-c(1:2),]
+# Handle Resference
+sig_list = list()
+for (i in 1:ncol(Signture)) {
+    sig_list[[i]] = data.frame(target = Signture[i],
+                        source = rep(colnames(Signture[i]),
+                                     length(Signture[i])),
+                        weight = 1)
+    sig_list[[i]] = drop_na(sig_list[[i]])
+    colnames(sig_list[[i]]) = c("target", "source", "weight")
+}
+Signture = bind_rows(sig_list)
+```
+
+```{r, eval=FALSE}
+acts <- run_wmean(
+    mat=Data@assays$SCT@data,
+    net=Signture,
+    .source='source',
+    .target='target',
+    .mor='weight',
+    times = 100,
+    minsize = 5)
+#acts$score <- clip.data(acts$score, lower = 0.01, upper = 0.99)
+```
+
+```{r, eval=FALSE}
+"{sig_sp}/{robj_dir}/pub_sig_acts_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = acts)
+```
+
+```{r, eval=FALSE}
+Data = Handle_Fun(acts_res = acts, object = Data, assay_name = "pub_sig")
+```
+
+### Signture Visulization
+
+```{r, fig.width=15, fig.height=10, eval=FALSE}
+FeaturePlot(Data, features = rownames(Data@assays$pub_sig)) & theme_plot
+```
+
+```{r, fig.height=10, fig.width=10, eval=FALSE}
+VlnPlot(Data, features = rownames(Data@assays$pub_sig), pt.size = 0, group.by = "annotation_lvl1", cols = cols) & 
+    stat_summary(fun.y = median, geom='point', size = 6, colour = "black", shape = 95)  & theme_plot
+```
+
+```{r, fig.width=20, fig.height=20, eval=FALSE}
+SpatialFeaturePlot(
+    Data,
+    features = rownames(Data@assays$pub_sig),ncol = 4, 
+    alpha = c(0, 1),
+    max.cutoff = "q95", crop = F) &
+    scale_fill_viridis_c() &
+  theme_plot
+```
+
+## Topics Signture
+
+```{r}
+Topics_Signture = "{sig_sp}/TranscriptionPrograms.xlsx" %>% 
+    glue::glue() %>%
+    here::here() %>%
+    readxl::read_xlsx(sheet = 1)
+Topics_Signture <- Topics_Signture[-1,]
+sig_list = list()
+for (i in 1:ncol(Topics_Signture)) {
+    sig_list[[i]] = data.frame(target = Topics_Signture[i],
+                        source = rep(colnames(Topics_Signture[i]),
+                                     length(Topics_Signture[i])),
+                        weight = 1)
+    sig_list[[i]] = drop_na(sig_list[[i]])
+    colnames(sig_list[[i]]) = c("target", "source", "weight")
+}
+Topics_Signture = bind_rows(sig_list)
+```
+
+```{r}
+for (i in seq_along(sig_list)) {
+  print(length(intersect(rownames(Data), sig_list[[i]]$target)))
+}
+```
+
+```{r}
+acts <- run_wmean(
+    mat=Data@assays$SCT@data,
+    net=Topics_Signture,
+    .source='source',
+    .target='target',
+    .mor='weight',
+    times = 100,
+    minsize = 5)
+#acts$score <- clip.data(acts$score, lower = 0.01, upper = 0.99)
+```
+
+```{r}
+"{sig_sp}/{robj_dir}/topic_sig_acts_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = acts)
+```
+
+```{r}
+Data = Handle_Fun(acts_res = acts, object = Data, assay_name = "tp_sig")
+```
+
+```{r, fig.width=20, fig.height=20}
+DefaultAssay(Data) <- "SCT"
+genes <- c("EMP1", "KRT20", "LAMB3", 
+           "GPRC5A", "LAMC2", "MAFK", "AMOTL2", 
+           "ATOH1", "NEURL1", "WFDC2", 
+           "LGR5", "SOX9", "ARID1A", 
+           "POLR1D", "EIF3F", "ELOB", 
+           "MKI67", "MCM3", "TIMELESS", 
+           "MYC", "PSMA1", "PRDX4")
+SpatialFeaturePlot(
+    Data,
+    features = genes,
+    ncol = 4, 
+    alpha = c(0, 1),
+    max.cutoff = "q95",
+    crop = F) &
+    scale_fill_viridis_c() &
+  theme_plot
+```
+
+### Signture Visulization
+
+```{r, fig.width=15, fig.height=10}
+FeaturePlot(Data, features = rownames(Data@assays$tp_sig)) & theme_plot
+```
+
+```{r, fig.height=10, fig.width=10}
+VlnPlot(Data, features = rownames(Data@assays$tp_sig), pt.size = 0, group.by = "annotation_lvl1", cols = cols) & 
+    stat_summary(fun.y = median, geom='point', size = 6, colour = "black", shape = 95)  & theme_plot
+```
+
+```{r, fig.width=20, fig.height=20}
+SpatialFeaturePlot(
+    Data,
+    features = rownames(Data@assays$tp_sig),ncol = 4, 
+    alpha = c(0, 1),
+    max.cutoff = "q95", crop = F) &
+    scale_fill_viridis_c() &
+  theme_plot
+```
+
+```{r, fig.width=20, fig.height=15, eval=FALSE}
+lapply(rownames(Data@assays$tp_sig), function(sig_name){
+  Signture_HeatMap(object = Data,
+                 signture_table = Topics_Signture,
+                 expr_slot = "scale.data",
+                 expr_assay = "SCT",
+                 expr_cols = magma(100),
+                 sig_name = sig_name,
+                 sig_assay = "tp_sig",
+                 meta_col = "annotation_lvl1")
+})
+```
+
+# Curated signture 
+
+```{r}
+mouse_Signture = "{sig_sp}/mouse_signatures.rds" %>% 
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+sig_list<- list()
+for (i in seq_along(mouse_Signture)) {
+    sig_list[[i]] = data.frame(target = mouse_Signture[[i]],
+                        source = rep(names(mouse_Signture[i]),
+                                     length(mouse_Signture[[i]])),
+                        weight = 1)
+    sig_list[[i]] = drop_na(sig_list[[i]])
+    colnames(sig_list[[i]]) = c("target", "source", "weight")
+    sig_list[[i]]$target <- str_to_upper(sig_list[[i]]$target)
+    sig_list[[i]] <- sig_list[[i]][!duplicated(sig_list[[i]]$target),]
+}
+
+mouse_Signture = bind_rows(sig_list)
+```
+
+```{r}
+acts <- run_wmean(
+    mat=Data@assays$SCT@data,
+    net=mouse_Signture,
+    .source='source',
+    .target='target',
+    .mor='weight',
+    times = 100,
+    minsize = 5)
+#acts$score <- clip.data(acts$score, lower = 0.01, upper = 0.99)
+```
+
+```{r}
+"{sig_sp}/{robj_dir}/mouse_sig_acts_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = acts)
+```
+
+```{r}
+Data = Handle_Fun(acts_res = acts, object = Data, assay_name = "mouse_sig")
+```
+
+### Signture Visulization
+
+```{r, fig.width=30, fig.height=30}
+FeaturePlot(Data, features = rownames(Data@assays$mouse_sig)) & theme_plot
+```
+
+```{r, fig.height=30, fig.width=30}
+VlnPlot(Data, features = rownames(Data@assays$mouse_sig), pt.size = 0, group.by = "annotation_lvl1", cols = cols) & 
+    stat_summary(fun.y = median, geom='point', size = 6, colour = "black", shape = 95)  & theme_plot
+```
+
+```{r fig.height=10, fig.width=20}
+ct <- rownames(Data@assays$mouse_sig)
+
+# Number of features in 'ct'
+num_features <- length(ct)
+
+# Loop through 'ct' in steps of 4
+for (i in seq(1, num_features, by = 4)) {
+    # Select a subset of 4 features (or fewer if at the end of the list)
+    selected_features <- ct[i:min(i+3, num_features)]
+    
+    # Run SpatialFeaturePlot with the selected features
+    print(SpatialFeaturePlot(
+        Data, crop = FALSE,
+        features = selected_features, ncol = 4,
+        alpha = c(0, 1),
+        max.cutoff = "q95"
+    ) & scale_fill_viridis_c())
+}
+```
+
+```{r, fig.width=20, fig.height=15, eval=FALSE}
+mouse_Signture$source <- str_replace_all(mouse_Signture$source, pattern = "_", "-")
+lapply(rownames(Data@assays$mouse_sig), function(sig_name){
+  Signture_HeatMap(object = Data,
+                 signture_table = mouse_Signture,
+                 expr_slot = "scale.data",
+                 expr_assay = "SCT",
+                 expr_cols = magma(100),
+                 sig_name = sig_name,
+                 sig_assay = "mouse_sig",
+                 meta_col = "annotation_lvl1")
+})
+```
+
+# Pelka TME Signatures 
+
+```{r, eval=FALSE}
+mgs_lvl1 <- "{decon_sp}/{robj_dir}/mgs-lvl1.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+```{r, eval=FALSE}
+mgs_lvl1 <- data.frame(source = mgs_lvl1$cluster, target = mgs_lvl1$gene, weight = mgs_lvl1$avg_log2FC)
+"%nin%" = Negate("%in%")
+mgs_lvl1 <- mgs_lvl1 %>% dplyr::filter(source %nin% c("Doublet", "Doublet "))
+```
+
+```{r, eval=FALSE}
+acts <- run_wmean(
+    mat=Data@assays$SCT@data,
+    net=mgs_lvl1,
+    .source='source',
+    .target='target',
+    .mor='weight',
+    times = 100,
+    minsize = 5)
+#acts$score <- clip.data(acts$score, lower = 0.01, upper = 0.99)
+```
+
+```{r, eval=FALSE}
+"{sig_sp}/{robj_dir}/pelka_tme_sig_acts_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = acts)
+```
+
+```{r, eval=FALSE}
+Data = Handle_Fun(acts_res = acts, object = Data, assay_name = "pelka_tme")
+```
+
+### Signture Visulization
+
+```{r, fig.width=30, fig.height=30, eval=FALSE}
+FeaturePlot(Data, features = rownames(Data@assays$pelka_tme)) & theme_plot
+```
+
+```{r, fig.height=30, fig.width=30, eval=FALSE}
+VlnPlot(Data, features = rownames(Data@assays$pelka_tme), pt.size = 0, group.by = "annotation_lvl1", cols = cols) & 
+    stat_summary(fun.y = median, geom='point', size = 6, colour = "black", shape = 95)  & theme_plot
+```
+
+```{r fig.height=10, fig.width=20, eval=FALSE}
+ct <- rownames(Data@assays$pelka_tme)
+
+# Number of features in 'ct'
+num_features <- length(ct)
+
+# Loop through 'ct' in steps of 4
+for (i in seq(1, num_features, by = 4)) {
+    # Select a subset of 4 features (or fewer if at the end of the list)
+    selected_features <- ct[i:min(i+3, num_features)]
+    
+    # Run SpatialFeaturePlot with the selected features
+    print(SpatialFeaturePlot(
+        Data, crop = FALSE,
+        features = selected_features, ncol = 4,
+        alpha = c(0, 1),
+        max.cutoff = "q95"
+    ) & scale_fill_viridis_c())
+}
+```
+
+```{r, fig.width=20, fig.height=15, eval=FALSE}
+mgs_lvl1$source <- str_replace_all(mgs_lvl1$source, pattern = "_", "-")
+lapply(rownames(Data@assays$pelka_tme), function(sig_name){
+  Signture_HeatMap(object = Data,
+                 signture_table = mgs_lvl1,
+                 expr_slot = "scale.data",
+                 expr_assay = "SCT",
+                 expr_cols = magma(100),
+                 sig_name = sig_name,
+                 sig_assay = "pelka_tme",
+                 meta_col = "annotation_lvl1")
+})
+```
+
+
+```{r}
+"{sig_sp}/{robj_dir}/signtures_se_{Sample}.rds" %>%
+  glue::glue() %>% 
+  here::here() %>%
+  saveRDS(object = Data)
+```
+
+```{r}
+sessionInfo()
+```
+

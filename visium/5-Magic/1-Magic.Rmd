@@ -1,0 +1,82 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "Run Magic denoising"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(reticulate)
+library(Rmagic)
+```
+
+we use this env conda activate /scratch/groups/singlecell/software/anaconda3/envs/spatial_r2 and running intreactive session 
+
+```{r}
+source(here::here("misc/paths.R"))
+
+Sample <- params$Sample
+Path <- "{annot_sp}/{robj_dir}/annot_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here()
+```
+
+```{r, warning=FALSE, message=FALSE}
+Data <- readRDS(Path)
+Data
+```
+
+# Prepare Magic
+
+```{r}
+DefaultAssay(Data) <- "SCT"
+counts <- GetAssayData(object = Data, slot = "data")
+counts <- t(counts)
+```
+
+# Run Magic
+
+```{r}
+Magic <- magic(counts)
+```
+
+```{r}
+Magic
+```
+
+```{r}
+magic.data<- Magic$result
+rownames(magic.data) <- rownames(counts)
+magic.data <- t(magic.data)
+Data[["MAGIC"]] <- magic.data %>% CreateAssayObject()
+```
+
+```{r}
+"{magic_sp}/{robj_dir}/magic_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = Data)
+```
+
+```{r}
+sessionInfo()
+```
+
+

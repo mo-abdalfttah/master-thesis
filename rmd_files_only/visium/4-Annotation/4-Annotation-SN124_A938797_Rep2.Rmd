@@ -1,0 +1,161 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+title: "Annnotation Clusters"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+library(Seurat)
+library(here)
+library(glue)
+library(tidyverse)
+```
+
+```{r}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+```
+
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample <- "SN124_A938797_Rep2"
+Path <- "{clust_sp}/{robj_dir}/clust_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here()
+```
+
+```{r, warning=FALSE, message=FALSE}
+Data <- readRDS(Path)
+```
+
+```{r}
+cols <- ggsci::pal_igv()(50)
+DimPlot(Data, group.by = "SCT_snn_res.0.3", cols =cols)
+SpatialDimPlot(Data, pt.size.factor = 2,group.by = "SCT_snn_res.0.3") + 
+  guides(fill = guide_legend(override.aes = list(size=10))) + 
+  scale_fill_manual(values = cols)
+```
+
+# Visulization for to 10 genes per cluster
+
+```{r}
+Markers <- "{clust_sp}/{robj_dir}/Markers_{Sample}.xlsx" %>%
+# de <- "{fa_sp}/{robj_dir}/fastTopics_de_small.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    read_excel_allsheets(.)
+```
+
+```{r, fig.width=20, fig.height=20}
+P1 = list()
+P2 = list()
+for (i in seq_along(Markers)) {
+  P1[[i]] = SpatialFeaturePlot(Data, features = Markers[[i]]$gene[1:10],alpha = c(0, 1), ncol = 4,
+        max.cutoff = "q95", crop = F) &
+          scale_fill_viridis_c()
+  
+  P2[[i]] = SpatialDimPlot(Data, label = FALSE) + 
+    guides(fill = guide_legend(override.aes = list(size=10))) + 
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+}
+P = list()
+for (i in seq_along(P1)) {
+  P[[i]] = P1[[i]] + P2[[i]]
+  print(P[[i]])
+}
+```
+
+
+```{r, fig.width=20, fig.height=15}
+for (i in seq_along(Markers)) {
+  print(VlnPlot(object = Data, features = Markers[[i]]$gene[1:10])) 
+}
+```
+
+# High level annotation 
+Here we will try to annotate cells as Immune Cells, Epithelial Cells, Endothelial Cells, Stromal Cells
+
+```{r, fig.width=20, fig.height=20}
+dimplot <- SpatialDimPlot(Data, label = FALSE) + 
+    guides(fill = guide_legend(override.aes = list(size=10))) + 
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+SpatialFeaturePlot(Data, features = c("PTPRC", "CD3E", "CD19", "CD14", # Immune Cells
+                                      "EPCAM", "CDH1", "KRT18", "MUC2","REG1A", "REG1B", "CEACAM6", "TGFBI", # Epithilial Cells
+                                      "PECAM1", "VWF", "CD34", "SELE", #Enothilial cells 
+                                      "VIM", "FAP", "DCN", "ACTA2" # Stromal Cells
+                                      ), max.cutoff = "q95", ncol = 4, alpha = c(0, 1), crop = F) & scale_fill_viridis_c() 
+FeaturePlot(Data, features = c("PTPRC", "CD3E", "CD19", "CD14",
+                                      "EPCAM", "CDH1", "KRT18", "MUC2","REG1A", "REG1B", "CEACAM6", "TGFBI",
+                                      "PECAM1", "VWF", "CD34", "SELE",
+                                      "VIM", "FAP", "DCN", "ACTA2"), max.cutoff = "q95") +
+  DimPlot(Data, cols = ggsci::pal_igv()(50)) +
+  SpatialDimPlot(Data, label = FALSE) + 
+    guides(fill = guide_legend(override.aes = list(size=10))) & 
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+
+VlnPlot(Data, features = c("PTPRC", "CD3E", "CD19", "CD14",
+                                      "EPCAM", "CDH1", "KRT18", "MUC2","REG1A", "REG1B", "CEACAM6", "TGFBI",
+                                      "PECAM1", "VWF", "CD34", "SELE",
+                                      "VIM", "FAP", "DCN", "ACTA2")) +
+  DimPlot(Data, cols = ggsci::pal_igv()(50)) +
+  SpatialDimPlot(Data, label = FALSE, pt.size.factor = 2.5) + 
+    guides(fill = guide_legend(override.aes = list(size=10))) & 
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+
+```
+
+```{r}
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        annotation_lvl1 = dplyr::case_when(
+            SCT_snn_res.0.3 == 0 ~ "TME",
+            SCT_snn_res.0.3 == 1 ~ "Epithelial",
+            SCT_snn_res.0.3 == 2 ~ "TME",
+            SCT_snn_res.0.3 == 3 ~ "TME",
+            SCT_snn_res.0.3 == 4 ~ "Epithelial-Normal"
+            )
+        )
+```
+
+```{r}
+Idents(Data) <- Data$annotation_lvl1
+DimPlot(Data)
+SpatialDimPlot(Data, crop = F) + 
+  guides(fill = guide_legend(override.aes = list(size=10))) + 
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+```
+
+```{r}
+"{annot_sp}/{robj_dir}/annot_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = Data)
+```
+
+```{r}
+sessionInfo()
+```
+

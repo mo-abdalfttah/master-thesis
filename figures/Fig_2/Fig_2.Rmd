@@ -1,0 +1,357 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 a whole story of CRC - `r params$Sample`"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+# library(OmnipathR)
+library(stringr)
+library(cowplot)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(reshape2)
+```
+
+```{r}
+them_plot <- theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    strip.text = element_text(size = 15), # For facet labels
+    plot.caption = element_text(size = 15), # For plot caption if used
+    plot.subtitle = element_text(size = 15) # For plot subtitle if used
+  )
+```
+
+```{r}
+Sample <- params$Sample
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample = "ST.colon1"
+```
+
+# Read Files
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+# Annotation 
+
+```{r}
+Idents(Data) <- Data$SCT_snn_res.0.5
+annot <- unique(Data$SCT_snn_res.0.5)
+pal <- ggsci::pal_igv()(length(annot))
+names(pal) <- annot
+
+DimPlot(Data,cols = ggsci::pal_igv()(50))
+p = SpatialDimPlot(Data, crop = F) + them_plot +
+  guides(fill = guide_legend(override.aes = list(size=8))) + 
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+"{vis}/for_presentation/Clustering_{Sample}.png" %>%
+  glue::glue() %>%
+  here::here() %>%
+  ggsave(filename = ., plot = p, width = 7, height = 7) 
+p
+```
+
+Assign the original cluster number to clustering numbers orderd by celltypes 
+```{r}
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        clusters = dplyr::case_when(
+            SCT_snn_res.0.5 == 0 ~ "Cluster 6",
+            SCT_snn_res.0.5 == 1 ~ "Cluster 1",
+            SCT_snn_res.0.5 == 2 ~ "Cluster 2",
+            SCT_snn_res.0.5 == 3 ~ "Cluster 0",
+            SCT_snn_res.0.5 == 4 ~ "Cluster 3",
+            SCT_snn_res.0.5 == 5 ~ "Cluster 5",
+            SCT_snn_res.0.5 == 6 ~ "Cluster 4",
+
+            )
+        )
+
+```
+
+
+```{r}
+Idents(Data) <- factor(Data$clusters)
+pdf(file = "figures/Fig_2/01_Spatial_Dim_clusters.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 8)
+SpatialDimPlot(Data, crop = F) + them_plot +
+  guides(fill = guide_legend(override.aes = list(size=12))) + 
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+dev.off()
+
+pdf(file = "figures/Fig_2/02_Dimplot_Clusters.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 8)
+DimPlot(Data,cols = ggsci::pal_igv()(50), pt.size = 3) + them_plot + guides(fill = guide_legend(override.aes = list(size=10)))
+dev.off()
+```
+
+Assign the cluster to cell lables 
+
+```{r}
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        annotation_lvl1 = dplyr::case_when(
+            clusters ==  "Cluster 6" ~ "Unknown",
+            clusters ==  "Cluster 1" ~ "Tumor Area 1",
+            clusters ==  "Cluster 2" ~ "Tumor Area 2",
+            clusters ==  "Cluster 0" ~ "Normal-Epithelial",
+            clusters ==  "Cluster 3" ~ "Tumor Area 3",
+            clusters ==  "Cluster 5" ~ "TME",
+            clusters ==  "Cluster 4" ~ "Tumor Area 4",
+
+            )
+        )
+
+Idents(Data) <- factor(Data$annotation_lvl1, levels = c("Normal-Epithelial", "Tumor Area 1", "Tumor Area 2", "Tumor Area 3", "Tumor Area 4", "TME", "Unknown"))
+pal <- c(
+  "Normal-Epithelial" = "#5050FFFF",  # blue
+  "TME" = "#BA6338FF",              # Yellow
+  "Tumor Area 1" = "#CE3D32FF",         # White blue
+  "Tumor Area 2" = "#749B58FF",           # Dark
+  "Tumor Area 3" = "#F0E685FF",           # Green
+  "Tumor Area 4" ="#466983FF",          # Blue
+  "Unknown" = "#5DB1DDFF"            # Red
+)
+
+```
+
+```{r}
+pdf(file = "figures/Fig_2/03_Spatial_Dim_Annotation.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 8)
+SpatialDimPlot(Data, crop = F) + them_plot +
+  guides(fill = guide_legend(override.aes = list(size=10))) + 
+  scale_fill_manual(values = pal)
+dev.off()
+```
+
+```{r}
+pdf(file = "figures/Fig_2/04_Vln_Markers_Annotation.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 7)
+VlnPlot(Data, c("MUC2", "SPINK4", "CXCL14", "CD74", "EPCAM", "EMP1"),
+        cols =  pal, 
+        group.by = "annotation_lvl1", ncol = 3, pt.size = 0) & them_plot & 
+    stat_summary(fun.y = median, geom='point', size = 5, colour = "black", shape = 95)
+dev.off()
+
+```
+
+# Panel 4
+
+```{r, fig.width=10}
+pdf(file = "figures/Fig_2/05a_Normal_deconv.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+SpatialFeaturePlot(Data, features = c("Normal.Epi_lvl1"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") & them_plot &
+  scale_fill_viridis_c(option = "mako")
+dev.off()
+```
+
+```{r, fig.width=10}
+pdf(file = "figures/Fig_2/05b_Normal_Topics.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+SpatialFeaturePlot(Data, features = c("Topic_10", "Topic_4"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") & them_plot &
+  scale_fill_viridis_c(option = "A")
+dev.off()
+```
+
+```{r, fig.width=10}
+pdf(file = "figures/Fig_2/05c_Normal_Signatures.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+DefaultAssay(Data) <- "mouse_sig"
+SpatialFeaturePlot(Data, features = c("Goblet-Smillie", "Enterocytes-Smillie"),
+                   ncol = 3,
+                   alpha = c(-1, 1),
+                   crop = F,
+                   max.cutoff = "q99") & them_plot & scale_fill_viridis_c(option = "E", limits = c(0, NA))
+dev.off()
+```
+
+
+
+# Supplementry data
+
+```{r}
+pdf(file = "figures/Fig_2/Supp_01_QC.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+SpatialFeaturePlot(Data, features = c("nCount_SCT", "nFeature_SCT", "percent.mito", "percent.ribo"), ncol = 4, crop = F) & them_plot
+dev.off()
+
+```
+
+```{r}
+DefaultAssay(Data) = "SCT"
+pdf(file = "figures/Fig_2/Supp_02_Markers.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 15)
+SpatialFeaturePlot(Data, features = c("MUC2", "SPINK4", "CXCL14", "CD74", "EPCAM", "EMP1"), ncol = 2, crop = F, max.cutoff = "q95", alpha = c(0, 1)) & them_plot
+dev.off()
+
+```
+
+Panel 3 - Dot plot
+
+```{r}
+DefaultAssay(Data) <- "SCT"
+Idents(Data) <- Data$annotation_lvl1
+markers <- FindAllMarkers(Data, only.pos = TRUE)
+```
+
+```{r, fig.width=7, fig.height=10}
+markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 0.5) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+```
+
+```{r}
+exp_mat <- as.matrix(Data[["SCT"]]@scale.data[top10$gene,])
+meta <- Data@meta.data %>% 
+  select(annotation_lvl1)
+meta <- bind_cols(meta, as.data.frame(t(exp_mat)))
+head(meta) #View the first few lies
+meta <- pivot_longer(meta, -annotation_lvl1, names_to="Gene", values_to="Expression")
+head(meta)
+meta_summary <- meta %>%
+  group_by(annotation_lvl1, Gene) %>%
+  summarise(Avg = mean(Expression),
+            Pct = sum(Expression > 0) / length(Expression) * 100)
+```
+
+```{r, fig.width=7, fig.height=15}
+meta_summary$Gene <- factor(meta_summary$Gene, levels=top10$gene)
+
+pdf(file = "figures/Fig_2/Supp_03_Dot_plot.pdf" %>% here::here() %>% glue::glue(), width = 7, height = 14)
+ggplot(meta_summary, aes(x=Gene, y=annotation_lvl1)) +
+  geom_point(aes(size = Pct, fill = Avg), color="black", shape=21) +
+  scale_size("% detected", range = c(0,6)) +
+  scale_fill_gradientn(colours = viridisLite::inferno(100),
+                       guide = guide_colorbar(ticks.colour = "black",
+                                              frame.colour = "black"),
+                       name = "Average\nexpression") +
+  ylab("Cluster") + xlab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=15, angle=45, hjust=1, color="black"),
+        axis.text.y = element_text(size=15, color="black"),
+        axis.title = element_text(size=15)) + coord_flip() + them_plot
+dev.off()
+```
+
+Topics Genes
+
+```{r}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+```
+
+```{r}
+Topics_genes <- "{fa_sp}/{robj_dir}/{Sample}_fastTopics_weights_filtered_10.xlsx" %>%
+# de <- "{fa_sp}/{robj_dir}/fastTopics_de_small.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    read_excel_allsheets(.)
+names <- names(Topics_genes)
+```
+
+```{r}
+# Function to create bar plot for a given dataframe
+create_bar_plot <- function(df, plot_color) {
+  # Sort the dataframe by weight in descending order
+  df_sorted <- df[order(df$weight, decreasing = TRUE), ]
+  
+  # Select the top 20 genes
+  top_20_genes <- head(df_sorted$gene, 20)
+  
+  # Filter the dataframe for top 20 genes
+  df_top_20 <- df[df$gene %in% top_20_genes, ]
+  
+  # Create the bar plot using ggplot2
+  plot <- ggplot(df_top_20, aes(x = reorder(gene, -weight), y = weight)) +
+    geom_bar(stat = "identity", fill = plot_color) +
+    labs(x = "Gene", y = "Weight") +
+    theme_bw() +
+      coord_flip() +
+     theme(
+  plot.title = element_text(size = 15),
+  axis.title = element_text(size = 15),
+  axis.text = element_text(size = 15),
+  legend.title = element_text(size = 15),
+  legend.text = element_text(size = 15))
+  
+  return(plot)
+}
+
+```
+
+
+```{r}
+barplots <- list()
+for (i in seq_along(Topics_genes)) {
+  barplots[[i]] <- create_bar_plot(Topics_genes[[i]], ggsci::pal_igv()(10)[i]) + ggtitle(names[i])
+}
+```
+
+```{r}
+pdf(file = "figures/Fig_2/Supp_04_bar_plot.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 20)
+cowplot::plot_grid(plotlist = barplots, ncol = 3)
+dev.off()
+```
+
+
+```{r}
+pdf(file = "figures/Fig_2/Supp_05_de_topic4.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 3)
+volcano_plot(de, k = 4,max.overlaps = 15, labels = genes) + geom_text_repel(max.overlaps = 15, color = "black")
+dev.off()
+
+```
+
+```{r}
+pdf(file = "figures/Fig_2/Supp_05_de_topic10.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 3)
+volcano_plot(de, k = 10,max.overlaps = 15, labels = genes) + geom_text_repel(max.overlaps = 15, color = "black")   # Adjust the `color` here
+dev.off()
+```
+

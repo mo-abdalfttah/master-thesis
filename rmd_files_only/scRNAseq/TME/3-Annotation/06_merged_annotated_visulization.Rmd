@@ -1,0 +1,184 @@
+---
+title: "TME Pilka Combined Visulization"
+author: "Mohmed Abdalfttah"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+## Libraries
+
+```{r}
+library(Seurat)
+library(cowplot)
+library(tidyverse)
+library(glue)
+library(here)
+cols = ggsci::pal_igv()(50)
+```
+
+
+```{r}
+them_plot <- theme(
+  plot.title = element_text(size = 8),
+  axis.title.x = element_text(size = 8),
+  axis.title.y = element_text(size = 8),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  legend.title = element_text(size = 8),
+  legend.text = element_text(size = 8))
+
+```
+
+## Setting parameters
+Loading necessary paths and parameters
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+se_obj <- "{annot_tme}/{robj_dir}/merged_annotated_tme.rds" %>%
+    here::here() %>%
+    glue::glue() %>%
+    readRDS(file = .)
+```
+
+```{r, fig.width=10, fig.height=10}
+DimPlot(se_obj, group.by = c("MMRStatus", "ClusterTop"))
+```
+
+```{r, fig.width=20, fig.height=10}
+DimPlot(se_obj, group.by = c("ClusterFull"))
+```
+
+```{r}
+se_obj
+```
+```{r}
+unique(se_obj$annotation_lvl2)
+se_obj = subset(se_obj, subset = annotation_lvl2 %in% "Schwann", invert = T)
+```
+
+```{r, fig.width=20, fig.height=20}
+DimPlot(se_obj, group.by = c("MMRStatus", "TumorStage", "Disease"), ncol = 2, label = F, cols = cols)
+DimPlot(se_obj, group.by = c("Patient"), cols = c(cols, ggsci::pal_uchicago(palette = "light")(9), ggsci::pal_uchicago(palette = "dark")(9)))
+
+```
+
+```{r, fig.width=15, fig.height=15}
+FeaturePlot(se_obj, features = c("nCount_SCT", "nFeature_SCT", "percent.mt"), ncol = 2)
+```
+
+
+```{r, fig.width=10}
+DimPlot(se_obj, group.by = "annotation_lvl1", cols = cols)
+```
+
+
+```{r, fig.width=20, fig.height=20}
+all_cell_markers <- c("CD3E", "CD4", "CD8A",  # T cells
+                      "NKG7", "NCR1", "NCR3",   # NK                   
+                      "CD19", "MS4A1",        # B cells
+                      "DCN", "FAP", "ENG", # Stromal cells
+                       "SDC1",         # Plasma cells
+                      "CD14", "LYZ", "CD1C", "ITGAX", "FCGR1A", # Myeloid cells
+                      "KIT", "TPSAB1", "TPSB2"  # MAST
+                      ) 
+
+FeaturePlot(se_obj, features = all_cell_markers, ncol = 4)
+```
+
+```{r, fig.width=20, fig.height=20}
+VlnPlot(se_obj, features = all_cell_markers, group.by = "annotation_lvl1", pt.size = 0)
+```
+
+```{r, fig.width=20, fig.height=10}
+DimPlot(se_obj, split.by = "annotation_lvl1", cols = cols, group.by = "annotation_lvl1")
+```
+
+
+```{r, fig.width=10}
+DimPlot(se_obj, cols = cols, group.by = "annotation_lvl2")
+```
+
+```{r, fig.height=20, fig.width=20}
+se_obj@meta.data$annotation_lvl2 <- factor(se_obj@meta.data$annotation_lvl2, levels = names(sort(table(se_obj@meta.data$annotation_lvl2), decreasing = TRUE)))
+
+# Now using ggplot to plot
+ggplot(data = se_obj@meta.data, aes(x = annotation_lvl2, fill = annotation_lvl2)) +
+  geom_bar() +
+  theme_light() +
+  coord_flip() +  # Flips the coordinates to make it horizontal
+  scale_fill_manual(values = cols)  # Assuming 'cols' is defined with the colors you want
+```
+
+
+# Markers of lvl 2
+```{r}
+markers <- "{annot_tme}/{robj_dir}/markers_annotation_lvl2.rds" %>%
+    here::here() %>%
+    glue::glue() %>%
+    readRDS(file = .)
+markers
+```
+
+```{r}
+Save_Markers = function(Markers, Path_write){
+  mgs_ls = lapply(sort(unique(Markers$cluster)), function(clust) {
+  Markers %>%
+    dplyr::filter(cluster == clust & pct.1 > 0.5) %>%
+    dplyr::arrange(dplyr::desc(avg_log2FC))
+    })
+  names(mgs_ls) = glue("{sort(unique(Markers$cluster))}")
+  openxlsx::write.xlsx(mgs_ls, file = Path_write)
+
+}
+
+"{annot_tme}/{robj_dir}/markers_annotation_lvl2.xlsx" %>%
+    glue::glue() %>%
+    here::here() %>%
+    Save_Markers(Markers =markers, Path_write = .)
+```
+
+```{r}
+# Get top 5 markers per cluster
+top_markers <- markers %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+top_marker_genes <- unique(top_markers$gene)
+
+```
+
+```{r, fig.width=25, fig.height=20}
+DoHeatmap(se_obj, features = top_marker_genes, label = F,group.colors = c(ggsci::pal_igv()(50), ggsci::pal_uchicago()(9))) +
+  scale_color_manual(values = c(ggsci::pal_igv()(50), ggsci::pal_uchicago()(9)))
+  
+```
+
+```{r, fig.width=20, fig.height=10}
+all_cell_types <- unique(se_obj@meta.data$annotation_lvl2)
+
+# Create a color palette, coloring "SpecificCellType" in red and others in grey
+colors <- setNames(rep("grey", length(all_cell_types)), all_cell_types)
+colors["Doublet"] <- "red"  # Replace "SpecificCellType" with the actual name of your cell type
+
+# Plotting UMAP with custom colors
+DimPlot(se_obj, reduction = "umap", group.by = "annotation_lvl2", cols = colors)
+```
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,233 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 Deconv Analysis - `r params$Sample`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(CellChat)
+library(patchwork)
+library(Seurat)
+library(ggplot2)
+cols <- ggsci::pal_igv()(50)
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+se_obj <- "scRNAseq/MSS_Pellka_epin_epit_tme_processed.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(file = .)
+```
+
+```{r, eval=FALSE}
+se_obj@meta.data <- se_obj@meta.data %>%
+  mutate(annotation_lvl1 = case_when(
+    ClusterTop == "Epi" & is.na(annotation_lvl1) ~ "Epi",  # If ClusterTop is 'Epi' and annotation_lvl1 is NA, assign "Epi"
+    ClusterTop == "Normal Epi" & is.na(annotation_lvl1) ~ "Normal Epi",  # If ClusterTop is 'Normal Epi' and annotation_lvl1 is NA, assign "Normal Epi"
+    TRUE ~ annotation_lvl1  # Otherwise, keep the existing value of annotation_lvl1
+  ))
+
+```
+
+```{r, fig.width=20, fig.height=15}
+DimPlot(se_obj, group.by = c("annotation_lvl1"), cols = ggsci::pal_igv()(50),raster = F)
+```
+
+# CellChat 
+
+# Create CellChat object
+
+```{r}
+cellchat <- createCellChat(object = se_obj, group.by = "annotation_lvl1", assay = "SCT")
+cellchat
+```
+
+# Load The Ligan-Receptor Database
+
+```{r}
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+```
+
+```{r}
+# subset the expression data of signaling genes for saving computation cost
+cellchat@DB <- CellChatDB
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+#future::plan("multisession", workers = 4) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+```
+
+# Inference of cell-cell communication network
+
+```{r}
+cellchat <- computeCommunProb(cellchat, type = "triMean")
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat <- aggregateNet(cellchat)
+```
+
+```{r}
+"scRNAseq/4-Cell_Communication/level_1_cellchat_obj.rd" %>%
+  here::here() %>%
+  glue::glue() %>%
+  saveRDS(object = cellchat)
+
+```
+
+```{r}
+cellchat <- "scRNAseq/4-Cell_Communication/level_1_cellchat_obj.rd" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(.)
+
+```
+
+# Visulization
+
+```{r}
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength", top = 0.3)
+```
+
+# Which cells send the signals to which cells? 
+
+```{r, fig.width=20, fig.height=10}
+mat <- cellchat@net$weight
+#par(mfrow = c(3,4), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+}
+
+```
+
+```{r}
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+```
+
+```{r, eval=FALSE}
+# Access all the signaling pathways showing significant communications
+pathways.show.all <- cellchat@netP$pathways
+# check the order of cell identity to set suitable vertex.receiver
+levels(cellchat@idents)
+vertex.receiver = seq(1,4)
+for (i in 1:length(pathways.show.all)) {
+  # Visualize communication network associated with both signaling pathway and individual L-R pairs
+  netVisual(cellchat, signaling = pathways.show.all[i], vertex.receiver = vertex.receiver, layout = "hierarchy")
+  # Compute and visualize the contribution of each ligand-receptor pair to the overall signaling pathway
+  gg <- netAnalysis_contribution(cellchat, signaling = pathways.show.all[i])
+  ggsave(filename=paste0("level_1/",pathways.show.all[i], "_L-R_contribution.pdf"), plot=gg, width = 3, height = 2, units = 'in', dpi = 300)
+}
+
+```
+
+
+
+```{r, fig.width=10, fig.height=10}
+cell_n <- c(1:length(levels(cellchat@idents)))
+for (i in seq_along(cell_n)) {
+  print(netVisual_bubble(cellchat, sources.use = cell_n[i], targets.use =c(1,2,3,4,5,6,7,8, 9, 10), remove.isolate = FALSE))
+}
+```
+
+```{r}
+for (i in seq_along(cell_n)) {
+  pdf(file =paste0("level_1/chord_gene_", levels(cellchat@idents)[i], "cellchat.pdf"), width = 10, height =10)
+  netVisual_chord_gene(cellchat, sources.use = cell_n[i], targets.use = c(1,2,3,4,5,6,7,8, 9, 10), lab.cex = 0.5,legend.pos.y = 30, title.name = levels(cellchat@idents)[i])
+  dev.off()
+}
+```
+
+
+CellChat also provides another intuitive way to visualize the dominant senders (sources) and receivers (targets) in a 2D space using scatter plot. x-axis and y-axis are respectively the total outgoing or incoming communication probability associated with each cell group. Dot size is proportional to the number of inferred links (both outgoing and incoming) associated with each cell group. Dot colors indicate different cell groups. Dot shapes indicate different categories of cell groups if group is defined.
+
+```{r, fig.width=10}
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellchat)
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+# Signaling role analysis on the cell-cell communication networks of interest
+gg2 <- netAnalysis_signalingRole_scatter(cellchat, signaling = c("APP", "CD74"))
+#> Signaling role analysis on the cell-cell communication network from user's input
+gg1 + gg2
+```
+
+
+```{r}
+pdf(file =paste0("level_1/Heatmap_outgoing_", "cellchat.pdf"), width = 20, height =20)
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", width = 40, height = 40)
+dev.off()
+
+pdf(file =paste0("level_1/Heatmap_incoming_", "cellchat.pdf"), width = 20, height =20)
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", width = 40, height = 40)
+dev.off()
+
+```
+
+```{r}
+netVisual_aggregate(cellchat, signaling = "SPP1", layout = "circle")
+netVisual_heatmap(cellchat, signaling = "SPP1", color.heatmap = "Reds")
+netAnalysis_contribution(cellchat, signaling = "SPP1")
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(1:10), signaling = c("SPP1"), remove.isolate = FALSE)
+
+netVisual_aggregate(cellchat, signaling = "CCL", layout = "circle")
+netVisual_heatmap(cellchat, signaling = "CCL", color.heatmap = "Reds")
+netAnalysis_contribution(cellchat, signaling = "CCL")
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(1:10), signaling = c("CCL"), remove.isolate = FALSE)
+
+
+netVisual_aggregate(cellchat, signaling = "CXCL", layout = "circle")
+netVisual_heatmap(cellchat, signaling = "CXCL", color.heatmap = "Reds")
+netAnalysis_contribution(cellchat, signaling = "CXCL")
+netVisual_bubble(cellchat, sources.use = 8, targets.use = c(1:10), signaling = c("CXCL"), remove.isolate = FALSE)
+
+
+netVisual_aggregate(cellchat, signaling = "IFN-II", layout = "circle")
+netVisual_heatmap(cellchat, signaling = "IFN-II", color.heatmap = "Reds")
+netAnalysis_contribution(cellchat, signaling = "IFN-II")
+
+
+
+netVisual_aggregate(cellchat, signaling = "MHC-II", layout = "circle")
+netVisual_heatmap(cellchat, signaling = "MHC-II", color.heatmap = "Reds")
+netAnalysis_contribution(cellchat, signaling = "MHC-II")
+
+
+netVisual_aggregate(cellchat, signaling = "MHC-I", layout = "circle")
+netVisual_heatmap(cellchat, signaling = "MHC-I", color.heatmap = "Reds")
+netAnalysis_contribution(cellchat, signaling = "MHC-I")
+
+
+netVisual_aggregate(cellchat, signaling = "MIF", layout = "circle", top = 0.3)
+netVisual_heatmap(cellchat, signaling = "MIF", color.heatmap = "Reds")
+netAnalysis_contribution(cellchat, signaling = "MIF")
+
+```
+
+```{r}
+sessionInfo()
+```
+

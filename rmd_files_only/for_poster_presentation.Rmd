@@ -1,0 +1,299 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 Pathway Analysis - `r params$Sample`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+#library(OmnipathR)
+library(stringr)
+library(cowplot)
+
+```
+
+```{r}
+Sample <- params$Sample
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+
+Sample = "ST.colon1"
+```
+
+# Define Functions
+
+```{r, warning=FALSE, message=FALSE}
+Handle_Fun = function(acts_res, object){
+  object[['pathwmean']] <- acts_res %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+  DefaultAssay(object = object) <- "pathwmean"
+  #object <- ScaleData(object)
+  #object@assays$pathwmean@data <- object@assays$pathwmean@scale.data
+  return(object)
+}
+
+HeatMap = function(object, N_Pathways){
+  df <- t(as.matrix(object@assays$pathwmean@data)) %>%
+    as.data.frame() %>%
+    mutate(cluster = Idents(object)) %>%
+    pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+    group_by(cluster, source) %>%
+    summarise(mean = mean(score))
+  df = df %>% filter(mean != Inf)
+  path <- df %>%
+    group_by(source) %>%
+    summarise(std = sd(mean)) %>%
+    arrange(-abs(std)) %>%
+    head(N_Pathways) %>%
+    pull(source)
+  
+  top_acts_mat <- df %>%
+    filter(source %in% path) %>%
+    pivot_wider(id_cols = 'cluster', names_from = 'source',
+                values_from = 'mean') %>%
+    column_to_rownames('cluster') %>%
+    as.matrix()
+  
+  top_acts_mat[is.na(top_acts_mat)] <- 0
+  palette_length = 100
+  my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+  my_breaks <- c(seq(min(top_acts_mat), 0, length.out=ceiling(palette_length/2) + 1),
+                 seq(0.05, max(top_acts_mat), length.out=floor(palette_length/2)))
+  
+  P1 = pheatmap(t(top_acts_mat), border_color = NA, color=my_color, breaks = my_breaks)
+  return(P1)
+}
+
+
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+```
+
+# Read Files
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+```{r}
+VlnPlot(Data, features = c("EPCAM", "FAP", "DCN"))
+```
+
+```{r, fig.width=20, fig.height=10}
+FeaturePlot(Data, features = c("EPCAM", "LGR5", "EMP1"))
+SpatialFeaturePlot(Data, features = c("EPCAM", "LGR5", "EMP1", "CPEB4", "C1QC", "C1QB", "C1QA"), alpha = c(0, 1), crop = F, ncol = 6)
+```
+
+```{r, fig.width=10}
+SpatialDimPlot(Data, label = FALSE, crop = F) + 
+  guides(fill = guide_legend(override.aes = list(size=10))) + 
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+```
+# Marker Genes
+
+```{r, fig.width=20, fig.height=5}
+DefaultAssay(Data) <- "SCT"
+p1 <- SpatialFeaturePlot(Data, features = c("KRT20", "MUC2", "EPCAM",# Epithilial Cells
+                                      "CD19", "VIM", "DCN"  # Stromal Cells
+                                      ),
+                   max.cutoff = "q95", 
+                   ncol = 6,
+                   alpha = c(-0.5, 1),
+                   crop = F) &
+  scale_fill_viridis_c(option = "A")
+p1
+```
+
+# Signatures
+
+```{r, fig.width=20, fig.height=5}
+DefaultAssay(Data) <- "mouse_sig"
+p2 <- SpatialFeaturePlot(Data, features = c("Differentiation", "Goblet-Smillie", "EpiHR", "CorHRC", # Epithilial Cells
+                                      "YAP-induced-Gregorieff", "YAP22-Wang" 
+                                      ), max.cutoff = "q95", ncol = 6, alpha = c(-1, 1), crop = F) &
+  scale_fill_viridis_c(option = "mako")
+
+p2
+```
+
+```{r, fig.width=20, fig.height=5}
+DefaultAssay(Data) <- "SCT"
+SpatialFeaturePlot(Data, features = c("KRT20", "MUC2", "KRT19","EMP1", "TIMP2", "F3"
+                                      ), max.cutoff = "q95", ncol = 6, alpha = c(-1, 1), crop = F) &
+  scale_fill_viridis_c(option = "mako")
+
+
+```
+
+# Topics Analysis
+
+```{r, fig.width=20, fig.height=5}
+gem_vec = "ST.colon1"
+topics <- c("Topic_3","Topic_4","Topic_10", "Topic_5", "Topic_7", "Topic_2")
+topic_plots <- lapply(colnames(Data[["topics"]]), function(i) {
+    print(i)
+    # Iterate over samples
+    plt <- lapply(gem_vec, function(j) {
+        # extract sample timepoint
+        stage <- Data@meta.data %>% dplyr::filter(gem_id == j) %>% pull("gem_id") %>% unique()
+        SpatialFeaturePlot(
+            Data,
+            alpha = c(0, 1),
+            features = i,
+            ncol = 1,
+            crop = FALSE,
+            max.cutoff = "q99",
+            images = j) &
+            labs(title = stage) &
+            scale_fill_viridis_c(option = "D",
+                # Set shared legend limits
+                limits = c(0, quantile(Data[["topics"]]@cell.embeddings[, i], 0.99))
+                ) &
+            theme(plot.title = element_text(hjust = 0.5))
+    }) %>% patchwork::wrap_plots(ncol = 1)
+    
+    # Return plot
+    plt
+})
+final_list <- list(topic_plots[[4]] , topic_plots[[10]],topic_plots[[7]], topic_plots[[3]], topic_plots[[2]], topic_plots[[5]])
+p3 <- plot_grid(plotlist = final_list, ncol = 6)
+p3
+```
+
+```{r}
+Topics_genes <- "{fa_sp}/{robj_dir}/fastTopics_weights_filtered.xlsx" %>%
+# de <- "{fa_sp}/{robj_dir}/fastTopics_de_small.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    read_excel_allsheets(.)
+names <- names(Topics_genes)
+
+```
+
+```{r, fig.width=20, fig.height=4}
+plot_colors <- ggsci::pal_igv()(15)
+
+# Function to create bar plot for a given dataframe
+create_bar_plot <- function(df, plot_color) {
+  # Sort the dataframe by weight in descending order
+  df_sorted <- df[order(df$weight, decreasing = TRUE), ]
+  
+  # Select the top 20 genes
+  top_20_genes <- head(df_sorted$gene, 20)
+  
+  # Filter the dataframe for top 20 genes
+  df_top_20 <- df[df$gene %in% top_20_genes, ]
+  
+  # Create the bar plot using ggplot2
+  plot <- ggplot(df_top_20, aes(x = reorder(gene, -weight), y = weight)) +
+    geom_bar(stat = "identity", fill = plot_color) +
+    labs(x = "Gene", y = "Weight") +
+    theme_bw() +
+      coord_flip()
+  
+  return(plot)
+}
+names <- paste0("Topic_", 1:10)
+# Loop over each dataframe in the list
+plot <- list()
+for (i in 1:length(Topics_genes)) {
+  # Extract the current dataframe
+  df <- Topics_genes[[i]]
+  
+  # Get the color for the current plot
+  plot_color <- plot_colors[i]
+  
+  # Create the bar plot for the current dataframe
+  plot[[i]] <- create_bar_plot(df, plot_color) + ggtitle(names[i])
+  
+}
+
+final_list <- list(plot[[4]], plot[[10]] , plot[[7]], plot[[3]],  plot[[2]], plot[[5]])
+p4 <- plot_grid(plotlist = final_list, ncol = 6)
+p4
+```
+
+# Pathways 
+
+```{r, fig.width=20, fig.height=5}
+DefaultAssay(Data) <- "pathwmean"
+p5 <- SpatialFeaturePlot(Data, features = c("WNT", "Hypoxia", "JAK-STAT", "NFkB", # Epithilial Cells
+                                      "TGFb", "TNFa"  # Stromal Cells
+                                      ), max.cutoff = "q95", ncol = 6, alpha = c(-0.5, 1), crop = F) & scale_fill_viridis_c(option = "E")
+p5
+```
+
+# Deconvloution 
+
+```{r, fig.width=20, fig.height=5}
+DefaultAssay(Data) <- "SCT"
+colnames(Data@meta.data)
+p6 <- SpatialFeaturePlot(Data, features = c("Endothelial_lvl2", "Mast_lvl2", "Macrophages_lvl2","CD8.T.CXCL8._lvl2",  
+                                      "B.Cells_lvl2", "CAF.CXCL14._lvl2"
+                                      ), max.cutoff = "q95", ncol = 6, alpha = c(-0.5, 1), crop = F) & scale_fill_viridis_c(option = "C")
+p6
+```
+
+```{r}
+p <- list(p1, p2, p3, p4, p6,  p5)
+
+```
+
+```{r}
+ggsave(plot = p1,width = 20, height = 5, filename = "p1.pdf")
+ggsave(plot = p2,width = 20, height = 5, filename = "p2.pdf")
+ggsave(plot = p3,width = 20, height = 5, filename = "p3.pdf")
+ggsave(plot = p4,width = 20, height = 5, filename = "p4.pdf")
+ggsave(plot = p5,width = 20, height = 5, filename = "p5.pdf")
+ggsave(plot = p6,width = 20, height = 5, filename = "p6.pdf")
+```
+
+```{r, fig.width=20, fig.height=30}
+final_plot_all <- plot_grid(plotlist = p, ncol = 1)
+ggsave(plot = final_plot_all,width = 20, height = 30, filename = "poster_result.pdf")
+final_plot_all
+```
+
+```{r}
+sessionInfo()
+```

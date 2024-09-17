@@ -1,0 +1,171 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "Fig 3 - `r params$Sample`"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+# library(OmnipathR)
+library(stringr)
+library(cowplot)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(reshape2)
+```
+
+```{r}
+two_features_cor <- function(seurat_obj, geneA, geneB) {
+
+  # Extract gene expression data
+  geneA_expr <- FetchData(seurat_obj, vars = geneA)[, 1]
+  geneB_expr <- FetchData(seurat_obj, vars = geneB)[, 1]  
+  # Combine the data into a single data frame
+  expr_data <- data.frame(GeneA = geneA_expr, GeneB = geneB_expr)
+  
+  # Compute the correlation and p-value
+  correlation_test <- cor.test(expr_data$GeneA, expr_data$GeneB, method = "pearson")
+  
+  # Handle the case where p.value is 0
+  p.value <- correlation_test$p.value
+  if (p.value == 0) {
+    p.value <- .Machine$double.eps
+  }
+  
+  # Create a dataframe to store the results
+  cor_results <- data.frame(
+    GeneA = geneA,
+    GeneB = geneB,
+    correlation = correlation_test$estimate,
+    p.value = p.value
+  )
+  
+  # Print the correlation coefficient and p-value
+  print(paste("Correlation coefficient between", geneA, "and", geneB, ":", cor_results$correlation))
+  print(paste("p-value:", cor_results$p.value))
+  
+  # Visualize the correlation
+  p <- ggplot(expr_data, aes(x = GeneA, y = GeneB)) +
+    geom_point() +
+    geom_smooth(method = "lm", col = "blue") +
+    labs(title = paste("Correlation between", geneA, "and", geneB, ":",
+                       round(cor_results$correlation, 2),
+                       "\n p-value:", signif(cor_results$p.value, 2)),
+         x = paste(geneA, "Expression"),
+         y = paste(geneB, "Expression")) +
+    theme_light()
+  
+  print(p)
+}
+```
+
+# Define Functions
+
+```{r}
+them_plot <- theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    strip.text = element_text(size = 15), # For facet labels
+    plot.caption = element_text(size = 15), # For plot caption if used
+    plot.subtitle = element_text(size = 15) # For plot subtitle if used
+  )
+```
+
+```{r}
+Sample <- params$Sample
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample = "ST.colon1"
+```
+
+# Read Files
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+
+```{r}
+pdf(file = "figures/Fig_3/02a_Spatial_CorHRC.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 5)
+SpatialFeaturePlot(Data, features = c("CorHRC"), alpha = c(0,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) & scale_fill_viridis_c(option = "E", limits = c(0, NA)) & them_plot
+dev.off()
+
+pdf(file = "figures/Fig_3/02b_Spatial_EMP1.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 5)
+SpatialFeaturePlot(Data, features = c("EMP1"), alpha = c(0,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) & scale_fill_viridis_c(option = "C", limits = c(0, NA)) & them_plot
+dev.off()
+
+```
+
+```{r}
+pdf(file = "figures/Fig_3/01a_Spatial_CSC.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 5)
+SpatialFeaturePlot(Data, features = c("LGR5-Munoz"), alpha = c(-1,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) & scale_fill_viridis_c(option = "E", limits = c(0, NA)) & them_plot
+dev.off()
+
+pdf(file = "figures/Fig_3/01b_Spatial_LGR5.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 5)
+SpatialFeaturePlot(Data, features = c("LGR5"), alpha = c(-1,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) & scale_fill_viridis_c(option = "C", limits = c(0, NA)) & them_plot
+dev.off()
+
+```
+
+
+```{r}
+pdf(file = "figures/Fig_3/03a_Spatial_Proliferation.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 5)
+SpatialFeaturePlot(Data, features = c("Proliferation"), alpha = c(-1,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) & scale_fill_viridis_c(option = "E", limits = c(0, NA)) & them_plot
+dev.off()
+
+pdf(file = "figures/Fig_3/03b_Spatial_TOP2A.pdf" %>% here::here() %>% glue::glue(), width = 4, height = 5)
+SpatialFeaturePlot(Data, features = c("TOP2A"), alpha = c(-2,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) & scale_fill_viridis_c(option = "C", limits = c(0, NA)) & them_plot
+dev.off()
+
+```
+
+```{r}
+Data2 <- subset(Data, subset = SCT_snn_res.0.5 == 6)
+```
+
+```{r}
+pdf(file = "figures/Fig_3/Correlation_EMP1_LGR5.pdf" %>% here::here() %>% glue::glue(), width = 5, height =4)
+two_features_cor(seurat_obj = Data2, geneA = "magic_EMP1", geneB = "magic_LGR5") + them_plot
+dev.off()
+```
+
+```{r}
+pdf(file = "figures/Fig_3/Correlation_EMP1_HRCs.pdf" %>% here::here() %>% glue::glue(), width = 5, height = 4)
+two_features_cor(seurat_obj = Data2, geneA = "magic_EMP1", geneB = "CorHRC")
+dev.off()
+```
+

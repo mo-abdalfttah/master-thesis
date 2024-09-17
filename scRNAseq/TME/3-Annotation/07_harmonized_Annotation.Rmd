@@ -1,0 +1,167 @@
+---
+title: "TME Pilka Hamonized the Annotation"
+author: "Mohmed Abdalfttah"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+## Libraries
+
+```{r}
+library(Seurat)
+library(cowplot)
+library(tidyverse)
+library(glue)
+library(here)
+cols = ggsci::pal_igv()(50)
+```
+
+
+```{r}
+them_plot <- theme(
+  plot.title = element_text(size = 8),
+  axis.title.x = element_text(size = 8),
+  axis.title.y = element_text(size = 8),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  legend.title = element_text(size = 8),
+  legend.text = element_text(size = 8))
+
+```
+
+## Setting parameters
+Loading necessary paths and parameters
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+se_obj <- "{annot_tme}/{robj_dir}/merged_annotated_tme.rds" %>%
+    here::here() %>%
+    glue::glue() %>%
+    readRDS(file = .)
+```
+
+```{r, fig.width=10}
+DimPlot(se_obj, group.by = "annotation_lvl1", cols = cols)
+DimPlot(se_obj, group.by = "annotation_lvl2", cols = cols)
+```
+
+```{r}
+unique(se_obj$annotation_lvl2)
+```
+
+
+```{r, fig.width=20, fig.height=10}
+se_obj@meta.data <- se_obj@meta.data %>%
+    dplyr::mutate(
+        final_annot = dplyr::case_when(
+            annotation_lvl2 == "B GC-like" ~ "B Cells",
+            annotation_lvl2 == "B IGLC2+" ~ "B Cells",
+            annotation_lvl2 == "B Proliferation" ~ "B Cells",
+            annotation_lvl2 == "B IGLC3+" ~ "B Cells",
+            annotation_lvl2 == "B HSP+" ~ "B Cells",
+            annotation_lvl2 == "Naive B Cells" ~ "B Cells",
+            annotation_lvl2 == "IGA+ B Cells" ~ "B Cells",
+            annotation_lvl2 == "NK XCL1+" ~ "NK",
+            annotation_lvl2 == "NK GZMA+" ~ "NK",
+            annotation_lvl2 == "NK CD16-hi" ~ "NK",
+            annotation_lvl2 == "CD4 T CXCL13" ~ "CD4 T CM",
+            annotation_lvl2 == "CD4 T HSPA+" ~ "CD4 T CM",
+            annotation_lvl2 == "CD8 T IL17A+" ~ "CD8 Exhausted",
+            annotation_lvl2 == "CD8 T KLRB1+" ~ "CD8 NK-like",
+            annotation_lvl2 == "Macrophages SPP1+" ~ "Macrophages",
+            annotation_lvl2 == "Macrophages" ~ "Macrophages",
+            annotation_lvl2 == "Myeloid MT1+" ~ "Macrophages",
+            annotation_lvl2 == "Macrophages SEPP1+" ~ "Macrophages",
+            annotation_lvl2 == "mregDC" ~ "Endothelial Proliferation", # it shouldn't change
+            annotation_lvl2 == "DC" ~ "DC",
+            TRUE ~ annotation_lvl2  # This line ensures that values not matching above conditions are kept as is
+            )
+        )
+# There is 10 Cells are NA and annotated before as B Cells, we just replace them 
+se_obj$final_annot <- replace(se_obj$final_annot, is.na(se_obj$final_annot), "B Cells")
+DimPlot(se_obj, group.by = c("final_annot"), cols = cols) 
+```
+```{r}
+se_obj <- subset(se_obj, subset = final_annot %in% c("Doublet "), invert = T)
+se_obj <- subset(se_obj, subset = final_annot %in% c("Doublet"), invert = T)
+```
+
+```{r, fig.width=20, fig.height=10}
+DimPlot(se_obj, group.by = c("final_annot"), cols = cols) 
+```
+
+# Modyfing level 1
+
+After deconvloution we find in level 1 we need to split between T/NK Cells to be CD4 T Cells-CD8 T Cells-NK Cells
+
+```{r}
+unique(se_obj$final_annot)
+```
+
+```{r}
+se_obj@meta.data <- se_obj@meta.data %>%
+  mutate(annotation_lvl1 = case_when(
+    final_annot %in% c("CD4 T Cytotoxic", "CD4 T Naive", "CD4 T CM", "Treg", "CD4 T Activated", "CD4 T Proliferation") ~ "T-CD4",
+    TRUE ~ annotation_lvl1  # Keeps original values where condition does not match
+  ))
+
+se_obj@meta.data <- se_obj@meta.data %>%
+  mutate(annotation_lvl1 = case_when(
+    final_annot %in% c("NK") ~ "NK",
+    TRUE ~ annotation_lvl1  # Keeps original values where condition does not match
+  ))
+
+
+se_obj@meta.data <- se_obj@meta.data %>%
+  mutate(annotation_lvl1 = case_when(
+    final_annot %in% c("CD8 T GZMH+", "CD8 T GZMK+", "Tgd", "CD8 T CXCL13+",
+                       "CD8 T Proliferation", "CD8 Exhausted", "CD8 NK-like", "CD8 T CXCL8+", "ILC") ~ "T-CD8",
+    TRUE ~ annotation_lvl1  # Keeps original values where condition does not match
+  ))
+
+```
+
+# Calculate markers and visulize
+
+```{r}
+Idents(se_obj) = se_obj$final_annot
+all.markers <- FindAllMarkers(se_obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+```{r}
+top_markers <- all.markers %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+top_marker_genes <- unique(top_markers$gene)
+
+```
+
+```{r, fig.width=20, fig.height=20}
+DoHeatmap(se_obj, features = top_marker_genes, label = F,group.colors = c(ggsci::pal_igv()(50), ggsci::pal_uchicago()(9))) +
+  scale_color_manual(values = c(ggsci::pal_igv()(50), ggsci::pal_uchicago()(9)))
+
+```
+
+```{r}
+se_obj <- "{annot_tme}/{robj_dir}/Final_Annotation.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  saveRDS(object = se_obj)
+
+```
+

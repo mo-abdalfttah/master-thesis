@@ -1,0 +1,139 @@
+---
+title: "Subset Epithilial Pelka"
+author: "Mohmed Abdalfttah"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+Analysis = function(obj, res, dim){
+  obj <-  SCTransform(obj, vst.flavor = "v2", verbose = TRUE, vars.to.regress = c("percent.mt"))
+  #obj <- NormalizeData(obj)
+  #obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  #obj <- ScaleData(obj)
+  obj <- RunPCA(obj, features = VariableFeatures(object = obj))
+  print(ElbowPlot(object = obj, ndims = 50))
+  obj = RunUMAP(object = obj, dims = dim, verbose = F)
+  obj = FindNeighbors(object = obj, dims =  dim, verbose = F)
+  obj = FindClusters(object = obj, resolution = res, verbose = F)
+}
+
+```
+
+## Libraries
+
+```{r}
+library(Seurat)
+library(cowplot)
+library(tidyverse)
+library(glue)
+library(here)
+```
+
+## Setting parameters
+Loading necessary paths and parameters
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+se_obj <- "{sc}/Cancer/pelka_raw.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(.)
+```
+
+```{r}
+metadata <-  "{sc}/Cancer/PelkaMSSmetadata.csv" %>%
+  here::here() %>%
+  glue::glue() %>%
+  read.csv(.)
+```
+
+```{r}
+metadata <- "scRNAseq/Cancer/Level3_Annotation_cancer_cells.csv" %>%
+  here::here() %>%
+  glue::glue() %>%
+  read.csv(.)
+```
+
+# Tumor cells based on Emily 
+```{r}
+to_have <- metadata$X
+```
+
+```{r}
+se_obj_epi_T <- se_obj[,colnames(se_obj) %in% to_have]
+```
+
+```{r}
+unique(se_obj_epi_T$ClusterMidway)
+```
+
+# Normal Epi cells
+
+We will not have normal epi from normal patients becouse  the TME we didn't have norma TME from normal patients, we just had MMRp
+
+```{r}
+se_obj_epi_n <- subset(se_obj, subset = ClusterMidway %in% "Epi")
+```
+
+```{r}
+table(se_obj_epi_n$ClusterMidway, se_obj_epi_n$MMRStatus)
+```
+
+
+# Since we have in epithilial cells normal, some cell coming from normal and other MMRd  MMRp, we will subset the non MMRd
+
+```{r}
+se_obj_epi_n <- subset(se_obj_epi_n, subset = MMRStatus %in% c("MMRp"))
+```
+
+```{r}
+table(se_obj_epi_n$ClusterMidway, se_obj_epi_n$MMRStatus)
+table(se_obj_epi_n$ClusterFull, se_obj_epi_n$MMRStatus)
+```
+
+```{r}
+rm(se_obj)
+gc()
+```
+
+```{r,}
+se_obj_epi <- merge(x = se_obj_epi_T, y = se_obj_epi_n)
+```
+
+```{r}
+se_obj_epi
+```
+
+```{r}
+table(se_obj_epi$ClusterMidway, se_obj_epi$MMRStatus)
+table(se_obj_epi$ClusterFull, se_obj_epi$MMRStatus)
+```
+
+```{r}
+"scRNAseq/Cancer/MSS_Pellka_Epi_cells.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  saveRDS(object = se_obj_epi)
+```
+
+```{r}
+sessionInfo()
+```
+
+

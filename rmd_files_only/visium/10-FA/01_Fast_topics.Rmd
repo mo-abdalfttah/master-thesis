@@ -1,0 +1,488 @@
+---
+author: "Mohmed Abdalfttah"
+params:
+  Sample: "Default!"
+title: "8.1 Fast Topics Analysis - `r params$Sample`"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: consle
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center")
+```
+
+# Introduction
+
+In this Rmarkdown document we are going to try to find shared gene programs between tumor cells usinh NMF, Topic modelling ([fastTopics](https://stephenslab.github.io/fastTopics/articles/single_cell_rnaseq_basic.html)) and MOFA!
+
+## Libraries
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)
+library(scales)
+library(colorBlindness)
+library(Matrix)
+library(Seurat)
+library(inflection)
+library(fastTopics)
+library(cowplot)
+library(glue)
+library(here)
+library(viridis)
+
+```
+
+## Parameters
+Here we will define and load objects and functions that will be used throughout the document.
+```{r warning = FALSE, message = FALSE}
+set.seed(687)
+
+# https://stackoverflow.com/questions/54596694/openblas-issue-with-combat-function-of-the-r-bioconductor-sva-package-on-torqu
+Sys.setenv(OPENBLAS_NUM_THREADS="1")
+```
+
+```{r}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+```
+
+## Load data
+We are going to start by reading all the tumoral fractions and bringing them together into a Seurat object
+
+Read in from the multiplexed experiment
+```{r}
+theme_plot <- theme(text = element_text(size = 15),    
+      title = element_text(size = 15),    
+      axis.title = element_text(size = 15),
+      axis.text = element_text(size = 15), 
+      legend.title = element_text(size = 15),
+      legend.text = element_text(size = 15))
+```
+
+```{r, echo=FALSE}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+#Sample = "ST.colon1"
+Sample <- params$Sample
+Path <- "{decon_sp}/{robj_dir}/Deconv_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here()
+```
+
+```{r, warning=FALSE, message=FALSE}
+Data <- readRDS(Path)
+DefaultAssay(Data) <- "SCT"
+Data
+```
+
+
+Extract count matrix and remove empty genes 
+```{r}
+# Remove empty genes
+mtx_c <- Data@assays$SCT@counts
+mtx_c <- mtx_c[sparseMatrixStats::rowSums2(mtx_c) > 0, ]
+```
+
+Set extract metadata
+```{r}
+# Annotation dataframe for heatmaps
+df_meta <- Data@meta.data[, c("annotation_lvl1", "gem_id")]
+```
+
+## Analysis
+
+### fastTopics
+
+Following [vignette-1](https://stephenslab.github.io/fastTopics/articles/single_cell_rnaseq_basic.html) and [vignette-2](https://stephenslab.github.io/fastTopics/articles/single_cell_rnaseq_practical.html)
+
+#### Fit the topic model
+```{r}
+# Number of topics
+k <- 10
+```
+
+```{r}
+fit <- fit_topic_model(
+    X = t(mtx_c), # It needs to be cells by genes
+    k = k, # assess this better with Davide
+    numiter.main = 100,
+    numiter.refine = 200,
+    verbose = "progressbar")
+
+"{fa_sp}/{robj_dir}/{Sample}_fit_topic_10.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = fit, file = .)
+```
+
+```{r}
+fit <- "{fa_sp}/{robj_dir}/{Sample}_fit_topic_10.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+
+Check the convergence of the model - It seems like the model is optimized with the number of iterations we set
+```{r}
+fastTopics::plot_progress(fit, x = "iter", add.point.every = 10, colors = "black")
+```
+
+#### Topics in space
+
+Save fastTopics as a dimensionality reduction assay
+```{r}
+Data[["topics"]] <- Seurat::CreateDimReducObject(
+  embeddings = fit$L,
+  loadings = fit$F,
+  assay = "SCT",
+  key = "Topic_")
+
+print(Data[["topics"]], dims = 1:k, nfeatures = 15)
+```
+
+```{r}
+# In an order that makes sense
+gem_vec <- c(Sample)
+
+# Iterate over topics
+lapply(colnames(Data[["topics"]]), function(i) {
+    print(i)
+    # Iterate over samples
+    plt <- lapply(gem_vec, function(j) {
+        # extract sample timepoint
+        stage <- Data@meta.data %>% dplyr::filter(gem_id == j) %>% pull("gem_id") %>% unique()
+        SpatialFeaturePlot(
+            Data,
+            features = i,
+            ncol = 1,
+            crop = FALSE,
+            pt.size.factor = 1.25,
+            max.cutoff = "q99",
+            images = j) &
+            labs(title = stage) &
+            scale_fill_viridis_c(
+                option = "magma",
+                # Set shared legend limits
+                limits = c(0, quantile(Data[["topics"]]@cell.embeddings[, i], 0.99))
+                ) &
+            theme(plot.title = element_text(hjust = 0.5))
+    }) %>% patchwork::wrap_plots(ncol = 1)
+    
+    # Save plot
+    "{fa_sp}/{robj_dir}/{Sample}_SpatialFeaturePlot-topic{i}.pdf" %>%
+    glue::glue() %>%
+    here::here() %>%
+    save_plot(filename = ., plot = plt, base_height = 10, base_width = 10)
+    
+    # Return plot
+    plt
+})
+```
+
+```{r}
+"{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = Data, file = .)
+```
+
+#### Factor enrichment
+We are going to follow the approach used in the paper [The spatial transcriptomic landscape of the healing mouse intestine following damage](https://www.nature.com/articles/s41467-022-28497-0) to understand the biology underlying the factors of interest.
+
+*Functional enrichment analysis was conducted on the genes with the highest weighted contribution to each factor. For each factor, the feature loading values lower than 0 were removed and the remaining values were log-transformed and smoothed using gaussian smoothing with a window length of 10. The top contributing genes were then selected using the Unit Invariant Knee (UIK) method based on the sigmoidal shaped curve defined by the smoothed values and their rank (uik function from the inflection R package).*
+
+```{r fig.width=6, fig.height=6}
+# Extract top genes from each factor using Unit Invariant Knee
+topic_genes <- lapply(seq_len(ncol(fit$F)), function(i) {
+    y_vec <- sort(fit$F[, i], decreasing = TRUE)
+    # Define inflecion point
+    n <- uik(x = seq_len(length(y_vec)), y = y_vec)
+    # Define top 10 genes
+    df <- data.frame(gene = names(y_vec), value = y_vec, rank = 1:length(y_vec)) %>%
+        mutate(lab = if_else(rank < 15, gene, NA_character_))
+    print(ggplot(df, aes(x = rank, y = y_vec)) +
+        geom_point() +
+        geom_vline(xintercept = n, linetype = "dashed", color = "red") +
+        ggrepel::geom_text_repel(aes(label = lab)) +
+        labs(title = glue("Topic-{i}")) +
+        theme_classic())
+    y_vec[1:n]
+})
+
+names(topic_genes) <- glue::glue("topic-{seq_len(ncol(fit$L))}")
+```
+
+table with the raw gene values
+```{r}
+# i <- names(topic_genes)[1]
+dd <- lapply(names(topic_genes), function(i){
+    data.frame(
+        value = topic_genes[[i]],
+        gene = names(topic_genes[[i]]),
+        factor = i)
+}) %>%
+    bind_rows() %>%
+    pivot_wider(names_from = factor, values_from = value, values_fill = 0)
+```
+
+Save top genes by topic to xlsx
+```{r}
+topic_ls <- lapply(names(topic_genes), function(i) {
+    data.frame(
+        gene = names(topic_genes[[i]]),
+        weight = topic_genes[[i]]
+    )
+})
+
+names(topic_ls) <- names(topic_genes)
+out_file_weights <- "{fa_sp}/{robj_dir}/{Sample}_fastTopics_weights_10.xlsx" %>%
+    glue::glue() %>%
+    here::here()
+
+# Remove file prior to writing it so that there is no overwriting issue
+file.remove(out_file_weights)
+# Save DE to spreadhseet
+openxlsx::write.xlsx(topic_ls, file = out_file_weights)
+```
+
+Save top genes by topic to xlsx REMOVING mitochondrial and ribosomal
+```{r}
+topic_ls <- lapply(names(topic_genes), function(i) {
+    data.frame(
+        gene = names(topic_genes[[i]]),
+        weight = topic_genes[[i]]
+    ) %>% filter(!str_detect(gene, "RP[s|l]|MT-"))
+})
+
+names(topic_ls) <- names(topic_genes)
+out_file_weights <- "{fa_sp}/{robj_dir}/{Sample}_fastTopics_weights_filtered_10.xlsx" %>%
+    glue::glue() %>%
+    here::here()
+
+# Remove file prior to writing it so that there is no overwriting issue
+file.remove(out_file_weights)
+# Save DE to spreadhseet
+openxlsx::write.xlsx(topic_ls, file = out_file_weights)
+```
+
+Evaluate the fit by spot type
+```{r}
+loglik <- loglik_multinom_topic_model(t(mtx_c), fit)
+
+pdat <- data.frame(loglik)
+ggplot(pdat,aes(loglik)) +
+  geom_histogram(bins = 64, color = "white",fill = "black",size = 0.25) +
+  labs(y = "number of cells") +
+  theme_cowplot(font_size = 10)
+```
+
+Check if there is a specific donor that is worsly predicted
+```{r, fig.height=6, fig.width=9}
+# donor_color <- colorBlindness::paletteMartin[1:10]
+# subpop_colors <- c("dodgerblue","forestgreen","darkmagenta","skyblue","gold")
+pdat <- data.frame(loglik = loglik,subpop = Data$gem_id)
+ggplot(pdat,aes(x = loglik,fill = subpop)) +
+  geom_histogram(bins = 64,color = "white",size = 0.25) +
+  # scale_fill_manual(values = donor_color) +
+  labs(y = "number of cells") +
+  theme_cowplot(font_size = 10)
+```
+
+#### Visualization
+
+Visualizing the topics without cell labels using the structure plot
+```{r, fig.width=25, fig.height=10, eval=FALSE}
+library(colorBlindness)
+structure_plot(fit, colors = colorBlindness::paletteMartin)
+```
+
+Interpreting topics using available cell labels 
+```{r, fig.height=15, fig.width=25, eval=FALSE}
+structure_plot(
+    fit,
+    topics = 1:k,
+    gap = 25,
+    colors = colorBlindness::paletteMartin,
+    grouping = Data$annotation_lvl1)
+```
+
+##### Topics in cells
+
+Look at the topic proportions across all cells
+```{r, fig.width=10, fig.height=7}
+tt <- t(fit$L / sparseMatrixStats::rowSums2(fit$L))
+
+# tt_sub <- tt[, subsamp]
+# tt_sub <- tt[sample(rownames(tt), 30000), ]
+
+plt <- pheatmap::pheatmap(
+    mat = tt,
+    cluster_rows = FALSE,
+    show_colnames = FALSE,
+    annotation_col = df_meta
+    # annotation_colors = list(donor_pal, annot_pal, annot_comb_id_pal)
+    )
+
+save_pheatmap_pdf <- function(x, filename, width=7, height=7) {
+   stopifnot(!missing(x))
+   stopifnot(!missing(filename))
+   pdf(filename, width=width, height=height)
+   grid::grid.newpage()
+   grid::grid.draw(x$gtable)
+   dev.off()
+}
+
+"{fa_sp}/{robj_dir}/heatmap_fastTopics_full.pdf" %>%
+    glue::glue() %>%
+    here::here() %>%
+    save_pheatmap_pdf(x = plt, filename = ., width = 25, height = 9)
+```
+
+##### PCA Visualization
+It is also sometimes helpful to visualize the structure in PCA plots which show the projection of the cells onto PCs of the topic proportions:
+```{r, eval=FALSE}
+(pca_plot(fit, fill = Data$annotation_lvl1, pcs = c(1, 2)) + pca_plot(fit, fill = Data$annotation_lvl1, pcs = c(1, 3))) /
+(pca_plot(fit, fill = Data$annotation_lvl1, pcs = c(2, 3)) + pca_plot(fit, fill = Data$annotation_lvl1, pcs = c(2, 4)))
+```
+
+# Top 30 Genes per topics
+
+Here we can see what is the top genes based on the weight of those genes in each topic
+
+```{r}
+Topics_genes <- "{fa_sp}/{robj_dir}/{Sample}_fastTopics_weights_filtered_10.xlsx" %>%
+# de <- "{fa_sp}/{robj_dir}/fastTopics_de_small.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    read_excel_allsheets(.)
+names <- names(Topics_genes)
+
+```
+
+```{r}
+plot_colors <- ggsci::pal_igv()(15)
+
+# Function to create bar plot for a given dataframe
+create_bar_plot <- function(df, plot_color) {
+  # Sort the dataframe by weight in descending order
+  df_sorted <- df[order(df$weight, decreasing = TRUE), ]
+  
+  # Select the top 20 genes
+  top_20_genes <- head(df_sorted$gene, 30)
+  
+  # Filter the dataframe for top 20 genes
+  df_top_20 <- df[df$gene %in% top_20_genes, ]
+  
+  # Create the bar plot using ggplot2
+  plot <- ggplot(df_top_20, aes(x = reorder(gene, -weight), y = weight)) +
+    geom_bar(stat = "identity", fill = plot_color) +
+    labs(x = "Gene", y = "Weight") +
+    theme_bw() +
+      coord_flip()
+  
+  return(plot)
+}
+
+# Loop over each dataframe in the list
+for (i in 1:length(Topics_genes)) {
+  # Extract the current dataframe
+  df <- Topics_genes[[i]]
+  
+  # Get the color for the current plot
+  plot_color <- plot_colors[i]
+  
+  # Create the bar plot for the current dataframe
+  plot <- create_bar_plot(df, plot_color) + ggtitle(names[i])
+  
+  # Display the plot
+  print(plot)
+}
+```
+
+# Correlation between topics 
+
+Here we see the correlation between genes in each topic, in binary_matrix the rows is the all genes including in all matrix, if the genes presented in any topic, the value of this gene in this topic will be 1, if not will be 0
+After that we see the correlation between the topic, to see which topic share genes with each other, for example topic number 5 share genes with topic 8, we know both are tumor related and they are presented in tumor area.
+
+```{r}
+# Get a list of all unique genes across all topics
+all_genes <- unique(unlist(lapply(Topics_genes, function(df) df$gene)))
+
+# Create an empty binary matrix with row names
+binary_matrix <- matrix(0, nrow = length(all_genes), ncol = 10, dimnames = list(all_genes, NULL))
+
+# Populate the binary matrix
+for (i in 1:10) {
+  df <- Topics_genes[[i]]
+  genes <- df$gene
+  
+  # Set 1 for genes present in the current topic
+  binary_matrix[genes, i] <- 1
+}
+
+# Calculate the correlation matrix
+cor_matrix <- cor(binary_matrix)
+colnames(cor_matrix) <- names
+rownames(cor_matrix) <- names
+# Create a heatmap of the correlation matrix
+pheatmap::pheatmap(cor_matrix,
+                   show_colnames = T,
+                   show_rownames = T,
+                   main = "Gene Presence Correlation between Topics",
+                   color =  rev(magma(50)))
+```
+
+```{r}
+set.seed(1)
+de <- de_analysis(fit,t(mtx_c),pseudocount = 0.1,
+                  control = list(ns = 1e4,nc = 1))
+```
+
+```{r}
+"{fa_sp}/{robj_dir}/{Sample}_de_analyis.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = de, file = .)
+```
+
+```{r}
+de <- "{fa_sp}/{robj_dir}/{Sample}_de_analyis.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+```{r}
+genes <- rownames(mtx_c)
+```
+
+```{r}
+p <- volcano_plot(de, k = 4,max.overlaps = 15, labels = genes)
+
+```
+
+## Session Information
+
+```{r}
+sessionInfo()
+```

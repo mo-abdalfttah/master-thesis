@@ -1,0 +1,250 @@
+---
+author: "Emily Middendorp & Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+title: "Jaccard Index and Topics Creation"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+library(Seurat)
+library(umap)
+library(dplyr)
+library(ggplot2)
+library(jsonlite)
+library(viridis)
+library(ComplexHeatmap)
+library(stringr)
+library(reshape2)
+#library(Rmagic)
+library(gtools)
+library(rlist)
+library(openxlsx)
+library(paletteer)
+library(MASS)
+library(tidyverse)
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+normal <- "{normal}/pelkaNorm_epithelial.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  readRDS(file = .)
+# This patient doesn't have any moudules
+normal <- subset(normal, Patient == "C119", invert = T)
+unique(normal$Patient)
+```
+
+#############################################
+# Number of modules vs Number of cells
+#############################################
+
+```{r, fig.width=10}
+library(paletteer)
+patientcolors <- ggsci::pal_igv()(35)
+names(patientcolors) <- names(table(normal$Patient))
+
+CellsperModule <- as.data.frame(patients <- unique(normal$Patient))
+colnames(CellsperModule) <- 'Patient'
+rownames(CellsperModule) <- CellsperModule$Patient
+
+CellsperModule$Cells <- CellsperModule$Patient
+CellsperModule$Modules <- CellsperModule$Patient
+
+for(currpat in CellsperModule$Patient){
+  CellsperModule[currpat,'Cells'] <- length(normal$Patient[normal$Patient == currpat])}
+
+for(currpat in CellsperModule$Patient){
+  path <- paste0("Y:/projects/Master's_Thesis/scRNAseq/Normal/1-HotSpot/",currpat,"/Modules_",currpat,"_CORE_30knn_200genes.csv")
+  patient.modules <- read.csv(path, row.names=1)
+  CellsperModule[currpat,'Modules'] <- max(patient.modules$Module)
+}
+
+CellsperModule$Cells <- as.numeric(CellsperModule$Cells)
+CellsperModule$Modules <- as.numeric(CellsperModule$Modules)
+
+ggplot(CellsperModule, aes(x = Cells, y = Modules, color = Patient))+geom_point(size=3)+
+  scale_y_continuous(breaks = seq(0,20,5),limits = c(0,20))+
+  theme_classic()+
+  ylab("Number of modules")+xlab("Number of cells")+ggtitle("Min. genes per module = 200")+
+  scale_color_manual(values = patientcolors)+
+  theme(panel.grid.minor = element_line(colour = "grey", linetype = 3),
+        panel.grid.major = element_line(colour = "grey", linetype = 2))
+```
+
+#############################################
+# Jaccard Index
+#############################################
+
+```{r, fig.width=20}
+Modules <- list()
+
+for(patient in unique(normal$Patient)){
+  # Open modules
+  curr.mods <- read.csv(paste0("Y:/projects/Master's_Thesis/scRNAseq/Normal/1-HotSpot/",patient,"/","Modules_",patient,"_CORE_30knn_200genes.csv"), row.names=1)
+  # Remove -1 values
+  curr.mods <- subset(curr.mods, Module!=-1)
+  # Split for list based on the moduls, each element in a list is a module
+  curr.mods <- split(x = rownames(curr.mods), f = curr.mods)
+  names(curr.mods) <- paste(patient,names(curr.mods),sep = "_")
+ 
+  Modules <- append(Modules,curr.mods)
+}
+
+JaccIndx <- sapply(Modules,function(x) sapply(Modules,function(y,x)length(intersect(x,y))/length(union(x,y)),x))
+
+matsc <- JaccIndx*100
+
+metadata.hm <- as_data_frame(sub("_.*","",rownames(JaccIndx)))
+rownames(metadata.hm) <- rownames(JaccIndx)
+colnames(metadata.hm) <- c("Patients")
+
+
+matsc[matsc < quantile(matsc, 0.02)] <- quantile(matsc, 0.02)
+matsc[matsc > quantile(matsc, 0.98)] <- quantile(matsc, 0.98)
+```
+
+
+## un-clusterd Heatmap
+
+```{r fig.width=20, fig.height=10}
+Heatmap(matsc,
+        show_row_names = FALSE, show_column_names = FALSE,
+        col = rev(viridis(12, option = "A")[4:12]),
+        show_row_dend = FALSE,show_column_dend = TRUE,
+        cluster_columns = TRUE, cluster_rows = TRUE,
+        row_names_gp = grid::gpar(fontsize = 9),name = "Jaccard Index",use_raster = FALSE,
+        column_title = "Min.genes per module 200",
+        top_annotation = HeatmapAnnotation(
+          Patient = metadata.hm$Patients,
+          show_legend = c(TRUE),
+          col=list(Patient = patientcolors)))
+
+```
+
+## Clustering 
+
+```{r, fig.width=10}
+library(FactoMineR)
+library(factoextra)
+nb.clust <- c(2, 3, 4, 5, 6, 7, 8, 9, 10)
+clust = list()
+clust.df <- list()
+for (i in seq_along(nb.clust)) {
+  clust[[i]] <- HCPC(as.data.frame(JaccIndx), nb.clust = nb.clust[i])
+  clust.df[[i]] <- as.data.frame(clust[[i]]$data.clust$clust)
+  rownames(clust.df[[i]]) <- rownames(clust[[i]]$data.clust)
+  clust.df[[i]] <- cbind(clust.df[[i]], clust[[i]]$data.clust$clust)
+  colnames(clust.df[[i]])[1] <- paste0("clust_res_", nb.clust[i])
+  clust.df[[i]] <- clust.df[[i]][-2]
+  clust.df[[i]] <- as.data.frame(clust.df[[i]])
+  "{hotspot_adata_norm}/{robj_dir}/MetamoduleClustering_res{nb.clust[i]}.csv" %>%
+  glue::glue() %>%
+  here::here() %>%
+  write.csv(x = clust.df[[i]],file = .)
+  }
+
+
+```
+
+## Clustering dendrogram and PCA
+
+```{r}
+for (i in seq_along(clust)) {
+  print(fviz_dend(clust[[i]],
+          cex = 0.3,                     # Label size
+          palette = "jco",               # Color palette see ?ggpubr::ggpar
+          rect_border = "jco",           # Rectangle color
+))
+  print(fviz_cluster(clust[[i]],
+             geom="point",
+             # show_labels = 1,          # Avoid label overlapping
+             show.clust.cent = TRUE, # Show cluster centers
+             palette = "jco",         # Color palette see ?ggpubr::ggpar
+             ggtheme = theme_minimal(),
+             main = "Factor map"))
+
+}
+```
+
+### give colors for the clusters 
+
+```{r}
+clustcols<- c(as.character(paletteer_d("fishualize::Cirrhilabrus_tonozukai", 5)),as.character(paletteer_d("fishualize::Coryphaena_hippurus", 5)))
+names(clustcols) <- as.character(seq(1,10))
+```
+
+
+## Clusterd Heatmap
+
+```{r, fig.width=15, fig.height=10}
+for (i in seq_along(clust.df)) {
+  clust_n <- clust.df[[i]][[1]]
+  print(Heatmap(
+    matsc ,
+    show_row_names = FALSE,
+    show_column_names = FALSE,
+    col = rev(viridis(12, option = "A")[4:12]),
+    show_row_dend = FALSE,
+    show_column_dend = TRUE,
+    cluster_columns = TRUE,
+    cluster_rows = TRUE,
+    row_split = clust_n,
+    column_split = clust_n,
+    row_names_gp = grid::gpar(fontsize = 9),
+    name = "Jaccard Index",
+    use_raster = FALSE,
+    column_title = "Min.genes per module 200",
+    top_annotation = HeatmapAnnotation(Patient = metadata.hm$Patients,show_legend = c(TRUE),col=list(Patient = patientcolors)),
+    left_annotation = rowAnnotation(clustering = clust_n,annotation_name_rot = 90,
+                                    annotation_name_gp= gpar(fontsize = 6),show_legend = c(TRUE),
+                                    simple_anno_size = unit(0.5, "cm"),col=list(clustering = clustcols))
+        ))
+
+}
+```
+
+# Metamodules
+
+```{r}
+Metamodules <- list()
+Metamodules_counts <- list()
+clust.df[[3]]$Modules <- rownames(clust.df[[3]])
+
+for(cluster in seq(1,4)){
+  curr.modules <- clust.df[[3]]$Modules[clust.df[[3]]$clust_res_4 == cluster]
+  Metamodules <- append(Metamodules, list(unique(as.character(unlist(Modules[curr.modules], recursive = FALSE)))))
+  Metamodules_counts <- append(Metamodules_counts, list(as.data.frame(table(as.character(unlist(Modules[curr.modules], recursive = FALSE))))))
+}
+names(Metamodules) <- paste0("TP", seq(1,4))
+```
+
+## Save Metamodules
+
+```{r}
+"{hotspot_adata_norm}/{robj_dir}/Metamodules_raw_res_0.4.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+  saveRDS(object = Metamodules,file = .)
+
+"{hotspot_adata_norm}/{robj_dir}/Metamodules_raw_res_0.4.xlsx" %>%
+  glue::glue() %>%
+  here::here() %>%
+  write.xlsx(x = setNames(as.list(lapply(Metamodules, data.frame)), names(Metamodules)), file=.)
+```
+
+
+```{r}
+sessionInfo()
+```
+

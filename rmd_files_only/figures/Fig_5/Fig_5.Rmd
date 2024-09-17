@@ -1,0 +1,200 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-06-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(CellChat)
+library(Seurat)
+```
+
+```{r}
+them_plot <- theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    strip.text = element_text(size = 15), # For facet labels
+    plot.caption = element_text(size = 15), # For plot caption if used
+    plot.subtitle = element_text(size = 15) # For plot subtitle if used
+  )
+```
+
+```{r}
+generate_heatmap <- function(cellchat, signaling) {
+  # Generate bubble plot data for the specified signaling pathway
+  x <- netVisual_bubble(cellchat, sources.use = 6, targets.use = c(1:7), signaling = signaling, remove.isolate = FALSE, sort.by.source.priority = TRUE, return.data = TRUE)
+  
+  # Prepare the data for the heatmap
+  heatmap_data <- x$communication %>%
+    filter(!is.na(prob)) %>%
+    select(interaction_name_2, source_target = source.target, prob) %>%
+    spread(key = source_target, value = prob) %>%
+    replace(is.na(.), 0)  # Replace NA in probability with 0
+  
+  # Set row names
+  rows <- heatmap_data$interaction_name_2
+  heatmap_data <- heatmap_data[,-1]
+  heatmap_data <- as.data.frame(heatmap_data)
+  rownames(heatmap_data) <- rows
+  
+  # Generate the heatmap
+  pheatmap::pheatmap(as.matrix(heatmap_data),cluster_cols = F, cluster_rows = F,
+                     #clustering_distance_rows = "euclidean",
+                     #clustering_distance_cols = "euclidean",
+                     #clustering_method = "complete",
+                     #scale = "row",
+                     #color = colorRampPalette(c("blue", "white", "red"))(50),
+                     annotation_legend = TRUE)
+}
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample = "ST.colon1"
+```
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+# Cells Communcation 
+
+```{r}
+cellchat <- "{cell_comm_sp}/{robj_dir}/{Sample}_cell_comm_obj.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+```{r}
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+```
+
+
+```{r}
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", width = 10, height = 22, font.size = 15)
+ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming",width = 10, height =22, font.size = 15)
+pdf(file = "figures/Fig_5/01_heatmap.pdf" %>% here::here() %>% glue::glue(), width = 12, height = 15)
+ht1 + ht2
+dev.off()
+```
+
+# CCL 
+
+CCL15 is a chemokine produced by cancer cells that attracts CCR1-expressing myeloid cells to the tumor microenvironment.
+
+Tumor-Associated Macrophages (TAMs): Once recruited, monocytes can differentiate into macrophages within the TME. These TAMs often adopt an immunosuppressive phenotype that supports tumor growth and metastasis.
+
+Inflammatory Responses: CCR1 activation on myeloid cells can lead to the production of pro-inflammatory cytokines and other factors that can either promote or inhibit tumor progression, depending on the context.
+
+Increased CCL15 expression promotes CRC cell proliferation and invasion via CCL15-CCR1 signaling.
+
+```{r}
+pal <- c(
+  "Normal-Epithelial" = "#5050FFFF",  # blue
+  "TME" = "#BA6338FF",              # Yellow
+  "Tumor Area 1" = "#CE3D32FF",         # White blue
+  "Tumor Area 2" = "#749B58FF",           # Dark
+  "Tumor Area 3" = "#F0E685FF",           # Green
+  "Tumor Area 4" ="#466983FF",          # Blue
+  "Unknown" = "#5DB1DDFF"            # Red
+)
+
+```
+
+```{r}
+library(CellChat)
+# Example usage
+pdf(file = "figures/Fig_5/02_heatmap.pdf" %>% here::here() %>% glue::glue(), width = 7, height = 4)
+generate_heatmap(cellchat, signaling = c("CCL")) + them_plot
+dev.off()
+pdf(file = "figures/Fig_5/03_circle.pdf" %>% here::here() %>% glue::glue(), width = 7, height = 4)
+netVisual_aggregate(cellchat, signaling = "CCL", layout = "circle", color.use = pal) + them_plot
+dev.off()
+```
+
+```{r}
+
+pdf(file = "figures/Fig_5/04_spatial.pdf" %>% here::here() %>% glue::glue(), width = 7, height = 4)
+SpatialFeaturePlot(Data, features = c("CCR1"), alpha = c(0,1), max.cutoff = "q99", crop = F, pt.size.factor = 1.5) + them_plot &
+  scale_fill_viridis_c(option = "F", limits = c(0, NA))
+dev.off()
+
+pdf(file = "figures/Fig_5/04_spatial_CCL15.pdf" %>% here::here() %>% glue::glue(), width = 7, height = 4)
+SpatialFeaturePlot(Data, features = c("CCL15"), alpha = c(0,1), max.cutoff = "q99", crop = F, pt.size.factor = 1.5) + them_plot &
+  scale_fill_viridis_c(option = "F", limits = c(0, NA))
+dev.off()
+
+```
+
+```{r}
+se_obj <- "scRNAseq/MSS_Pellka_epin_epit_tme_processed.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(file = .)
+
+se_obj@meta.data <- se_obj@meta.data %>%
+  mutate(annotation_lvl1 = case_when(
+    ClusterTop == "Epi" & is.na(annotation_lvl1) ~ "Epi",  # If ClusterTop is 'Epi' and annotation_lvl1 is NA, assign "Epi"
+    ClusterTop == "Normal Epi" & is.na(annotation_lvl1) ~ "Normal Epi",  # If ClusterTop is 'Normal Epi' and annotation_lvl1 is NA, assign "Normal Epi"
+    TRUE ~ annotation_lvl1  # Otherwise, keep the existing value of annotation_lvl1
+  ))
+
+```
+
+```{r}
+them_plot <- theme(
+    plot.title = element_text(size = 25),
+    axis.title = element_text(size = 25),
+    axis.text = element_text(size = 25),
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25),
+    strip.text = element_text(size = 25), # For facet labels
+    plot.caption = element_text(size = 25), # For plot caption if used
+    plot.subtitle = element_text(size = 25) # For plot subtitle if used
+  )
+
+```
+
+```{r}
+png(file = "figures/Fig_5/06_singlecell.png" %>% here::here() %>% glue::glue(), width = 700, height = 400)
+VlnPlot(se_obj, features = c("CCR1"), group.by = "annotation_lvl1",raster = F,  cols = ggsci::pal_igv()(50)) + them_plot
+dev.off()
+```
+
+```{r}
+png(file = "figures/Fig_5/07_singlecell.png" %>% here::here() %>% glue::glue(), width = 600, height = 400)
+FeaturePlot(se_obj, features = c("CCR1"), raster = F, order = T) + 
+    them_plot +
+    scale_color_gradientn(
+        colors = c("lightgrey", "blue"),  # Default Seurat colors
+        breaks = c(0, 1,2)  # Adjust breaks as needed
+    )
+dev.off()
+
+png(file = "figures/Fig_5/08_singlecell.png" %>% here::here() %>% glue::glue(), width = 600, height = 400)
+FeaturePlot(se_obj, features = c("CCL15"), raster = F, order = T) + 
+    them_plot +
+    scale_color_gradientn(
+        colors = c("lightgrey", "blue"),  # Default Seurat colors
+        breaks = c(0,2,4)  # Adjust breaks as needed
+    )
+dev.off()
+
+```
+
+
+

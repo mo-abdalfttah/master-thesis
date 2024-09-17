@@ -1,0 +1,201 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 a whole story of CRC - `r params$Sample`"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+# library(OmnipathR)
+library(stringr)
+library(cowplot)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(reshape2)
+```
+
+```{r}
+them_plot <- theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    strip.text = element_text(size = 15), # For facet labels
+    plot.caption = element_text(size = 15), # For plot caption if used
+    plot.subtitle = element_text(size = 15) # For plot subtitle if used
+  )
+```
+
+```{r}
+Sample <- params$Sample
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample = "ST.colon1"
+```
+
+# Read Files
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+# Annotation 
+
+
+```{r}
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        clusters = dplyr::case_when(
+            SCT_snn_res.0.5 == 0 ~ "Cluster 6",
+            SCT_snn_res.0.5 == 1 ~ "Cluster 1",
+            SCT_snn_res.0.5 == 2 ~ "Cluster 2",
+            SCT_snn_res.0.5 == 3 ~ "Cluster 0",
+            SCT_snn_res.0.5 == 4 ~ "Cluster 3",
+            SCT_snn_res.0.5 == 5 ~ "Cluster 5",
+            SCT_snn_res.0.5 == 6 ~ "Cluster 4",
+
+            )
+        )
+
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        annotation_lvl1 = dplyr::case_when(
+            clusters ==  "Cluster 6" ~ "Unknown",
+            clusters ==  "Cluster 1" ~ "Tumor Area 1",
+            clusters ==  "Cluster 2" ~ "Tumor Area 2",
+            clusters ==  "Cluster 0" ~ "Normal-Epithelial",
+            clusters ==  "Cluster 3" ~ "Tumor Area 3",
+            clusters ==  "Cluster 5" ~ "TME",
+            clusters ==  "Cluster 4" ~ "Tumor Area 4",
+
+            )
+        )
+
+Idents(Data) <- factor(Data$annotation_lvl1, levels = c("Normal-Epithelial", "Tumor Area 1", "Tumor Area 2", "Tumor Area 3", "Tumor Area 4", "TME", "Unknown"))
+pal <- c(
+  "Normal-Epithelial" = "#5050FFFF",  # blue
+  "TME" = "#BA6338FF",              # Yellow
+  "Tumor Area 1" = "#CE3D32FF",         # White blue
+  "Tumor Area 2" = "#749B58FF",           # Dark
+  "Tumor Area 3" = "#F0E685FF",           # Green
+  "Tumor Area 4" ="#466983FF",          # Blue
+  "Unknown" = "#5DB1DDFF"            # Red
+)
+```
+
+# Map marker Genes 
+Panel 5
+
+```{r}
+pdf(file = "figures/general_supp/Normal_Vilon.pdf" %>% here::here() %>% glue::glue(), width = 12, height =12)
+DefaultAssay(Data) <- "SCT"
+VlnPlot(Data, features = c("Normal.Epi_lvl1","Topic_10", "Topic_4", "Goblet-Smillie", "Enterocytes-Smillie", "CorHRC", "magic_EMP1", "Proliferation","magic_TOP2A"),
+        group.by = "annotation_lvl1", cols = pal, pt.size = 0, ncol =3) & 
+    stat_summary(fun.y = median, geom='point', size = 5, colour = "black", shape = 95)
+dev.off()
+```
+
+```{r}
+pdf(file = "figures/general_supp/CoreHRCs_quantfication.pdf" %>% here::here() %>% glue::glue(), width = 7, height = 5)
+VlnPlot(Data, features = "CorHRC", cols = pal, pt.size = 0) & stat_summary(fun.y = median, geom='point', size = 6, colour = "black", shape = 95)  & them_plot
+dev.off()
+```
+
+```{r}
+pdf(file = "figures/general_supp/EMP1_quantfication.pdf" %>% here::here() %>% glue::glue(), width = 7, height = 5)
+VlnPlot(Data, features = "magic_EMP1", cols = pal, pt.size = 0) & stat_summary(fun.y = median, geom='point', size = 6, colour = "black", shape = 95)  & them_plot
+dev.off()
+```
+
+# Deconv Supp 
+
+```{r}
+res_lvl1 <- "{decon_sp}/{robj_dir}/Deconv_se_{Sample}_lvl1.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+```{r}
+ct <- colnames(Data@meta.data)[str_detect(colnames(Data@meta.data), "lvl1")]
+# remove first and last three values since they are not celltypes 
+ct <- ct[-1]
+ct <- ct[-((length(ct)-2):length(ct))]
+```
+
+
+```{r}
+mat <- select(Data@meta.data, c(ct, "SCT_snn_res.0.5"))
+```
+
+```{r}
+df_long <- mat %>%
+  pivot_longer(cols = -c(SCT_snn_res.0.5),  # Keep 'SCT_snn_res.0.5' and other identifiers, if any
+               names_to = "Cell_Type",
+               values_to = "Value")
+
+# Check the transformed data
+head(df_long)
+```
+
+```{r}
+# Normalize the values within each cluster
+df_normalized <- df_long %>%
+  group_by(SCT_snn_res.0.5) %>%
+  mutate(Percentage = Value / sum(Value)) %>%
+  ungroup()
+
+# Check the normalized data
+head(df_normalized)
+```
+
+```{r}
+pdf(file = "figures/general_supp/barplot.pdf" %>% here::here() %>% glue::glue(), width = 6, height = 4)
+# Create the stacked bar plot
+ggplot(df_normalized, aes(x = as.factor(SCT_snn_res.0.5), y = Percentage, fill = Cell_Type)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Cluster", y = "Percentage", fill = "Cell Type") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_minimal() +
+  labs(x = "Clusters", y = "Proportion", fill = "Cell Type") +
+  theme_minimal() +
+  scale_fill_manual(values = ggsci::pal_uchicago()(11)) + them_plot
+dev.off()
+```
+
+```{r}
+sessionInfo()
+```
+

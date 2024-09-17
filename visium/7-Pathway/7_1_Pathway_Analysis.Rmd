@@ -1,0 +1,184 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 Pathway Analysis - `r params$Sample`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+#library(OmnipathR)
+library(stringr)
+```
+
+```{r}
+Sample <- params$Sample
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+
+#Sample = "ST.colon1"
+```
+
+# Define Functions
+
+```{r, warning=FALSE, message=FALSE}
+Handle_Fun = function(acts_res, object){
+  object[['pathwmean']] <- acts_res %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+  DefaultAssay(object = object) <- "pathwmean"
+  #object <- ScaleData(object)
+  #object@assays$pathwmean@data <- object@assays$pathwmean@scale.data
+  return(object)
+}
+
+HeatMap = function(object, N_Pathways){
+  df <- t(as.matrix(object@assays$pathwmean@data)) %>%
+    as.data.frame() %>%
+    mutate(cluster = Idents(object)) %>%
+    pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+    group_by(cluster, source) %>%
+    summarise(mean = mean(score))
+  df = df %>% filter(mean != Inf)
+  path <- df %>%
+    group_by(source) %>%
+    summarise(std = sd(mean)) %>%
+    arrange(-abs(std)) %>%
+    head(N_Pathways) %>%
+    pull(source)
+  
+  top_acts_mat <- df %>%
+    filter(source %in% path) %>%
+    pivot_wider(id_cols = 'cluster', names_from = 'source',
+                values_from = 'mean') %>%
+    column_to_rownames('cluster') %>%
+    as.matrix()
+  
+  top_acts_mat[is.na(top_acts_mat)] <- 0
+  palette_length = 100
+  my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+  my_breaks <- c(seq(min(top_acts_mat), 0, length.out=ceiling(palette_length/2) + 1),
+                 seq(0.05, max(top_acts_mat), length.out=floor(palette_length/2)))
+  
+  P1 = pheatmap(t(top_acts_mat), border_color = NA, color=my_color, breaks = my_breaks)
+  return(P1)
+}
+
+```
+
+# Read Files
+
+```{r}
+Data = "{sig_sp}/{robj_dir}/signtures_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+```{r, fig.width=10}
+SpatialDimPlot(Data, label = FALSE, crop = F) + 
+  guides(fill = guide_legend(override.aes = list(size=10))) + 
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+```
+
+# Load pathway database 
+
+```{r, eval=FALSE}
+net <- get_progeny(organism = 'human', top = 100)
+saveRDS(net, "get_progeny_human_100.rds")
+```
+
+```{r}
+net <- readRDS("get_progeny_human_100.rds")
+```
+
+# Analysis
+
+```{r}
+acts <- run_wmean(mat=as.matrix(Data@assays$SCT@data), 
+                     net=net,
+                     .source='source',
+                     .target='target',
+                     .mor='weight',
+                     times = 100,
+                     minsize = 5)
+```
+
+```{r}
+Data = Handle_Fun(acts_res = acts, object = Data)
+```
+
+## Spatial Featur Plot
+
+```{r,fig.width=20, fig.height=20, warning=FALSE, message=FALSE}
+DefaultAssay(Data) = "pathwmean"
+
+dim_plt = SpatialDimPlot(Data, label = FALSE) +
+    guides(fill = guide_legend(override.aes = list(size=5))) +
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+Spat = SpatialFeaturePlot(Data,
+                          rownames(Data@assays$pathwmean@data),
+                          alpha = c(0, 1),
+                          max.cutoff = "q99", crop = F) &
+    scale_fill_viridis_c()
+
+Spat + dim_plt 
+```
+
+## Vilon Plot 
+
+```{r,fig.width=20, fig.height=20}
+VlnPlot(Data, rownames(Data@assays$pathwmean@data),pt.size = 0,
+        cols = ggsci::pal_igv()(50))
+```
+
+## HeatMap
+
+```{r}
+HeatMap(object = Data, N_Pathways = 14)
+```
+
+```{r}
+DefaultAssay(Data) = "SCT"
+"{path_sp}/{robj_dir}/Pathway_se_{Sample}.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = Data, file = .)
+
+"{path_sp}/{robj_dir}/Pathway_{Sample}.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = acts, file = .)
+```
+
+
+```{r}
+sessionInfo()
+```
+

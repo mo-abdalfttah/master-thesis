@@ -1,0 +1,172 @@
+---
+title: "Myeloid Annotation"
+author: "Mohmed Abdalfttah"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Libraries
+
+```{r}
+library(Seurat)
+library(cowplot)
+library(tidyverse)
+library(glue)
+library(here)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+Analysis = function(obj, res, dim){
+  obj <-  SCTransform(obj, vst.flavor = "v2", verbose = TRUE, vars.to.regress = c("percent.mt"))
+  #obj <- NormalizeData(obj)
+  #obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  #obj <- ScaleData(obj)
+  obj <- RunPCA(obj, features = VariableFeatures(object = obj))
+  print(ElbowPlot(object = obj, ndims = 50))
+  obj = RunUMAP(object = obj, dims = dim, verbose = F)
+  obj = FindNeighbors(object = obj, dims =  dim, verbose = F)
+  obj = FindClusters(object = obj, resolution = res, verbose = F)
+}
+
+Save_Markers = function(Markers, Path_write){
+  mgs_ls = lapply(sort(unique(Markers$cluster)), function(clust) {
+  Markers %>%
+    dplyr::filter(cluster == clust & pct.1 > 0.5) %>%
+    dplyr::arrange(dplyr::desc(avg_log2FC))
+    })
+  names(mgs_ls) = glue("cluster-{sort(unique(Markers$cluster))}")
+  openxlsx::write.xlsx(mgs_ls, file = Path_write)
+
+}
+
+```
+
+
+
+```{r}
+them_plot <- theme(
+  plot.title = element_text(size = 8),
+  axis.title.x = element_text(size = 8),
+  axis.title.y = element_text(size = 8),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  legend.title = element_text(size = 8),
+  legend.text = element_text(size = 8))
+cols = ggsci::pal_igv()(50)
+```
+
+## Setting parameters
+Loading necessary paths and parameters
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+se_obj <- "{annot_tme}/{robj_dir}/B_obj.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(.)
+```
+
+```{r}
+DimPlot(se_obj, group.by = "ClusterTop")
+```
+
+
+```{r}
+se_obj <- Analysis(obj = se_obj, res = c(0.1, 0.2, 0.3, 0.4, 0.5), dim = 1:30)
+```
+
+```{r, fig.width=15, fig.height=10}
+DimPlot(se_obj, group.by = c("SCT_snn_res.0.1","SCT_snn_res.0.2", "SCT_snn_res.0.3", "SCT_snn_res.0.4", "SCT_snn_res.0.5"), cols = cols)
+```
+
+```{r, fig.width=20}
+DimPlot(se_obj, group.by = c("ClusterMidway", "ClusterFull", "SCT_snn_res.0.3"), cols = cols, ncol = 2, label = F)
+```
+
+```{r, fig.width=20, fig.height=20}
+FeaturePlot(object = se_obj, features = c("JCHAN","MS4A1", "IGHM","TCL1A", "IL4R", "ÏGHD", "CD27", "IGHA1", "IGHG1", "MZB1", "CD38", "CD40", "STMN1", "EPCAM", "KRT18", "KRT19", "IGLC3", "IGLC2"), max.cutoff = "q99") +
+   DimPlot(se_obj, group.by = "SCT_snn_res.0.3", cols = cols)
+VlnPlot(object = se_obj, features = c("JCHAN","MS4A1", "IGHM","TCL1A", "IL4R", "ÏGHD", "CD27", "IGHA1", "IGHG1", "MZB1", "CD38", "CD40", "STMN1", "EPCAM", "KRT18", "KRT19", "IGLC3", "IGLC2")) 
+```
+
+```{r}
+Idents(se_obj) <- se_obj$SCT_snn_res.0.3
+markers <- FindAllMarkers(se_obj, only.pos = TRUE)
+
+```
+
+```{r, fig.width=20, fig.height=20}
+markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 0.25) %>%
+    slice_head(n = 20) %>%
+    ungroup() -> top10
+DoHeatmap(se_obj, features = top10$gene) + NoLegend()
+```
+
+```{r}
+"{annot_tme}/{robj_dir}/markers_BCells.xlsx" %>%
+    glue::glue() %>%
+    here::here() %>%
+    Save_Markers(Markers =markers, Path_write = .)
+```
+
+https://onlinelibrary.wiley.com/doi/10.1111/imm.13568
+
+```{r}
+top10
+```
+
+
+```{r, fig.width=20}
+DimPlot(se_obj, group.by = c("ClusterMidway", "ClusterFull", "SCT_snn_res.0.3"), cols = cols, ncol = 2)
+```
+
+
+```{r, fig.width=20, fig.height=20}
+caf_markers <- c("FAP", "PDGFRA", "PDPN", "CXCL14", "TNC")
+FeaturePlot(object = se_obj, features = caf_markers) +
+  DimPlot(se_obj, group.by = c("ClusterMidway","SCT_snn_res.0.2"), cols = cols, ncol = 2)
+```
+
+```{r}
+se_obj@meta.data <- se_obj@meta.data %>%
+    dplyr::mutate(
+        annotation_lvl2 = dplyr::case_when(
+            SCT_snn_res.0.3 == 0 ~ "IGA+ B Cells",
+            SCT_snn_res.0.3 == 1 ~ "Naive B Cells",
+            SCT_snn_res.0.3 == 2 ~ "B GC-like",
+            SCT_snn_res.0.3 == 3 ~ "B IGLC3+",
+            SCT_snn_res.0.3 == 4 ~ "B IGLC2+",
+            SCT_snn_res.0.3 == 5 ~ "B Proliferation",
+            SCT_snn_res.0.3 == 6 ~ "IGA+ B Cells",
+            SCT_snn_res.0.3 == 7 ~ "Doublet",
+            SCT_snn_res.0.3 == 8 ~ "Doublet",
+            SCT_snn_res.0.3 == 9 ~ "B HSP+"
+            )
+        )
+DimPlot(se_obj, group.by = c("annotation_lvl2"), cols = cols) 
+```
+
+```{r}
+se_obj <- "{annot_tme}/{robj_dir}/B_obj_Annotated.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  saveRDS(object = se_obj)
+
+```

@@ -1,0 +1,143 @@
+---
+title: "Topic GSEA"
+author: "Marc Elosua Bayes & Mohmed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center")
+```
+
+```{r}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+```
+
+# Introduction
+
+In this Rmarkdown document we are going to carry out gene set enrichment analysis on the topic weights and the DEGs. 
+
+## Libraries
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)
+library(scales)
+library(colorBlindness)
+library(Matrix)
+library(Seurat)
+library(inflection)
+library(fastTopics)
+library(cowplot)
+library(glue)
+library(here)
+library(fgsea)
+library(org.Hs.eg.db)
+```
+
+## Parameters
+Here we will define and load objects and functions that will be used throughout the document.
+```{r warning = FALSE, message = FALSE}
+source(here::here("misc/paths.R"))
+set.seed(687)
+```
+
+## Load data
+
+Load topic profiles
+```{r}
+fit <- "{fa_sp}/{robj_dir}/fit_topic.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+
+# Gene Ontology
+
+```{r}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+GO_genes <- "{fa_sp}/{robj_dir}/fastTopics_weights_filtered.xlsx" %>%
+# de <- "{fa_sp}/{robj_dir}/fastTopics_de_small.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    read_excel_allsheets(.)
+
+```
+
+```{r}
+library(org.Mm.eg.db)
+GO_genes <- lapply(seq_along(GO_genes), function(i) {
+  gene_names <- GO_genes[[i]]$gene
+  AnnotationDbi::select(org.Hs.eg.db,
+                        keys = gene_names,
+                        columns = "ENTREZID",
+                        keytype = "SYMBOL")
+})
+
+```
+
+```{r, fig.width=10, fig.height=10}
+library(clusterProfiler)
+ego <- lapply(seq_along(GO_genes), function(i) {
+  enrichGO(gene = GO_genes[[i]]$ENTREZID,
+           OrgDb = org.Hs.eg.db,
+           ont = "BP",
+           pAdjustMethod = "BH",
+           pvalueCutoff = 0.01,
+           qvalueCutoff = 0.05,
+           readable = TRUE)
+})
+```
+
+```{r, fig.width=10, fig.height=10}
+for (i in seq_along(ego)) {
+    print(dotplot(ego[[i]], showCategory=30) + ggtitle(names(GO_genes)[i]) +
+              theme(axis.text.y = element_text(size = 8)))
+    print(cnetplot(ego[[i]], node_label="all", cex_label_category = 1.2) +
+              ggtitle(names(GO_genes)[i]))
+}
+```
+
+```{r, fig.width=20, fig.height=10}
+for (i in seq_along(ego)) {
+    print(heatplot(ego[[i]], showCategory=10) + ggtitle(names(GO_genes)[i]))
+}
+```
+
+```{r, fig.width=20, fig.height=10}
+for (i in seq_along(ego)) {
+    print(barplot(ego[[i]], showCategory=10) + ggtitle(names(GO_genes)[i]))
+}
+```
+
+## Session Information
+
+```{r}
+sessionInfo()
+```

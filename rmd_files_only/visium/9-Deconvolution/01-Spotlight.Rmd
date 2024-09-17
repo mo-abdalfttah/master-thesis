@@ -1,0 +1,707 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 Deconv Analysis - `r params$Sample`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+# Function to perform hierarchical clustering
+hierarchical_clustering <- function(matrix_data, cluster_by = "rows", metric = "euclidean", method = "ward.D2", k) {
+    # If clustering by columns, transpose the matrix
+    if (cluster_by == "columns") {
+        matrix_data <- t(matrix_data)
+    }
+    
+    # Compute the distance matrix
+    dist_matrix <- dist(matrix_data, method = metric)
+    
+    # Perform hierarchical clustering
+    hc <- hclust(dist_matrix, method = method)
+    
+    # Convert to a dendrogram object
+    dend <- as.dendrogram(hc)
+    
+    # Function to compute WCSS for a given number of clusters
+    wcss <- function(k) {
+        clusters <- cutree(hc, k = k)
+        sum(sapply(split(matrix_data, clusters), function(cluster_data) {
+            dist_matrix <- dist(cluster_data)
+            sum(dist_matrix^2)
+        }))
+    }
+    
+    # Compute WCSS for different cluster counts
+    cluster_counts <- 1:20  # Example range for cluster counts
+    wcss_values <- sapply(cluster_counts, wcss)
+    
+    # Create a scree plot for WCSS vs. number of clusters
+    plot(cluster_counts, wcss_values, type = "b", main = "WCSS vs. Number of Clusters", xlab = "Number of Clusters", ylab = "WCSS")
+    
+    # Cut the tree at the optimal number of clusters
+    optimal_clusters <- which.min(diff(diff(wcss_values)))
+    #clusters <- cutree(hc, k = optimal_clusters) #we replace optical cluster by k, so it is not optical it selected by us
+    clusters <- cutree(hc, k = k)
+
+    # Plot the dendrogram
+    plot(dend, main = "Hierarchical Clustering Dendrogram", xlab = ifelse(cluster_by == "rows", "Spots", "Cell Types"), ylab = "Distance")
+    abline(h = hc$height[length(hc$height) - k + 1], col = "red")
+    
+    # Return the cluster labels
+    return(clusters)
+}
+
+name_clusters <- function(df) {
+    # Group by clusters and compute the average proportions for each cell type
+    cluster_summaries <- df %>%
+        group_by(prop_clusters) %>%
+        summarise(across(everything()[-which(names(df) == "prop_clusters")], mean, na.rm = TRUE))
+
+    # Function to get the name of a cluster based on its most abundant cell types
+    get_cluster_name <- function(cluster_row) {
+        # Exclude the cluster label to only consider cell type columns
+        cluster_props <- cluster_row[-1]
+
+        # Sort the cell types by their average proportions in descending order
+        sorted_indices <- order(cluster_props, decreasing = TRUE)
+        sorted_props <- cluster_props[sorted_indices]
+        sorted_names <- names(cluster_props)[sorted_indices]
+
+        # Get the names and proportions of the top two cell types
+        top_two_names <- sorted_names[1:2]
+        top_two_props <- sorted_props[1:2] * 100  # Convert to percentages
+
+        # Create strings for each cell type with its percentage
+        top_two_strings <- mapply(function(name, prop) paste(name, round(prop, 2), "%"), top_two_names, top_two_props)
+
+        # Return a string listing these cell types with their percentages
+        paste(top_two_strings, collapse = ", ")
+    }
+
+    # Apply this function to each cluster summary row to get cluster names
+    cluster_names <- sapply(1:nrow(cluster_summaries), function(i) get_cluster_name(cluster_summaries[i, ]))
+
+    # Map these names back to the original data frame
+    cluster_name_mapping <- setNames(cluster_names, cluster_summaries$prop_clusters)
+
+    # Add these names as a new column in the original data frame
+    df <- df %>% mutate(ClusterName = cluster_name_mapping[as.character(prop_clusters)])
+
+    return(df)
+}
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(glue)
+library(here)
+# Install specific commit before removing ref_scale in runDeconvolution
+# remotes::install_github("https://github.com/MarcElosua/SPOTlight", ref = "9d2597b")
+library(SPOTlight)
+library(Seurat)
+library(ggplot2)
+library(presto)
+cols <- ggsci::pal_igv()(50)
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample = "ST.colon1"
+Sample = params$Sample
+```
+
+```{r}
+Data = "{path_sp}/{robj_dir}/Pathway_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+```{r}
+se_obj <- "scRNAseq/Final_MSS_Pellka_all_cells.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(file = .)
+```
+
+```{r, fig.width=15, fig.height=7}
+DimPlot(se_obj, group.by = c("annotation_lvl1"), cols = ggsci::pal_igv()(50),raster = F)
+DimPlot(se_obj, group.by = c("all_cells_lvl2"), cols = ggsci::pal_igv()(50),raster = F)
+#DimPlot(se_obj, group.by = c("all_cells_lvl3"), cols = c(ggsci::pal_igv()(50), ggsci::pal_uchicago()(9), ggsci::pal_tron()(1)),raster = F)
+```
+
+```{r}
+knitr::kable(table(se_obj$all_cells_lvl2))
+knitr::kable(table(se_obj$ClusterTop))
+```
+
+Little clean up to remove genes that are all 0s
+
+```{r}
+(se_obj <- se_obj[sparseMatrixStats::rowSums2(se_obj@assays$SCT@counts) > 0])
+genes <- rownames(se_obj)[!grepl(pattern = "^RP[l|s]|MT", x = rownames(se_obj))]
+```
+
+```{r}
+hvg <- VariableFeatures(se_obj)[!grepl(pattern = "^RP[l|s]|MT", x = VariableFeatures(se_obj))]
+```
+
+```{r, fig.width=10, fig.height=5}
+DimPlot(se_obj, group.by = c("annotation_lvl1"), cols = cols, raster=FALSE) 
+```
+
+```{r}
+Idents(se_obj) <- se_obj$annotation_lvl1
+mgs_lvl1 <- FindAllMarkers(
+    se_obj,
+    only.pos = TRUE,
+    min.pct = 0.25,
+    logfc.threshold = 0.25)
+```
+
+```{r}
+"{decon_sp}/{robj_dir}/mgs_lvl1.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = mgs_lvl1)
+
+```
+
+```{r}
+mgs_lvl1 <- "{decon_sp}/{robj_dir}/mgs_lvl1.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+      readRDS(file = .)
+```
+
+## Deconvolution Level-1
+
+Run deconvolution
+
+
+```{r}
+res_lvl1 <- SPOTlight(
+    x = se_obj,
+    y = Data,
+    groups = as.character(se_obj$annotation_lvl1),
+    mgs = mgs_lvl1,
+    hvg = hvg,
+    weight_id = "avg_log2FC",
+    group_id = "cluster",
+    gene_id = "gene",
+    assay_sc = "SCT",
+    assay_sp = "SCT")
+
+"{decon_sp}/{robj_dir}/Deconv_se_{Sample}_lvl1.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = res_lvl1, file = .)
+
+```
+
+```{r}
+res_lvl1 <- "{decon_sp}/{robj_dir}/Deconv_se_{Sample}_lvl1.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+### Visualization 
+
+First of all we are going to look at the topic profiles to ensure the signatures learnt are specific to each cell type
+
+```{r, fig.width=10, fig.height=10}
+mod <- res_lvl1$NMF
+
+
+# Profiles
+plotTopicProfiles(
+    x = mod,
+    y = se_obj$annotation_lvl1,
+    facet = FALSE,
+    min_prop = 0.01,
+    ncol = 1) +
+    theme(aspect.ratio = 1)
+
+# Topics
+plotTopicProfiles(
+    x = mod,
+    y = se_obj$annotation_lvl1,
+    facet = TRUE,
+    min_prop = 0.01,
+    ncol =10)
+```
+
+Clean up the results by removing those cell types predicted to be < 3% to a spot
+
+```{r}
+mat <- res_lvl1$mat
+mat[mat < 0.03] <- 0
+colnames(mat) <- glue("{colnames(mat)}_lvl1")
+Data <- AddMetaData(object = Data, metadata = as.data.frame(mat))
+```
+
+# Visulization 
+
+## Colocalization 
+
+```{r}
+plotInteractions(mat, which = "heatmap", metric = "prop")
+plotInteractions(mat, which = "heatmap", metric = "jaccard")
+plotInteractions(mat, which = "network")
+```
+
+## Pie chart for the porpotion 
+
+```{r}
+ct <- colnames(mat)
+mat[mat < 0.1] <- 0
+
+# Define color palette
+# (here we use 'paletteMartin' from the 'colorBlindness' package)
+paletteMartin <- c("#8856a7", "#2ca25f", "#43a2ca", "#e34a33", "#c994c7",
+                   "#fde0dd", "#f7fcb9", "#7fcdbb", "#d8b365", "#404040")
+
+pal <- colorRampPalette(paletteMartin)(length(ct))
+names(pal) <- ct
+
+x <- plotSpatialScatterpie(
+    x = Data,
+    y = mat,
+    cell_types = colnames(mat),
+    img = FALSE,
+    scatterpie_alpha = 1,
+    pie_scale = 0.4) +
+    scale_fill_manual(
+        values = pal,
+        breaks = names(pal)) +
+    scale_y_reverse()
+x
+```
+
+## Identify the most abundant cell type for each spot
+
+```{r}
+# Identify the most abundant cell type for each spot
+most_abundant <- apply(mat, 1, function(row) {
+  max_index <- which.max(row)
+  colnames(mat)[max_index]
+})
+most_abundant
+# Add the annotations as a new column to the data matrix
+annotated_data_matrix <- data.frame(row.names = rownames(mat), most_abundant_lvl1 = most_abundant)
+Data <- AddMetaData(object = Data, metadata = annotated_data_matrix)
+```
+
+```{r}
+Idents(Data) <- Data$most_abundant_lvl1
+SpatialDimPlot(Data, label = FALSE) +
+    guides(fill = guide_legend(override.aes = list(size=10))) +
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+```
+
+## Box plot Quantifying cell porpotions in each celltype
+
+```{r}
+library(ggplot2)
+
+# Assuming your data matrix is named 'proportions_matrix'
+
+# Convert proportions matrix to a data frame for plotting
+proportions_data <- as.data.frame(mat)
+
+# Reshape the data frame into long format for ggplot
+library(reshape2)
+proportions_data_long <- melt(proportions_data, variable.name = "Cell_Type", value.name = "Proportion")
+
+# Create violin plot
+ggplot(proportions_data_long, aes(x = Cell_Type, y = Proportion, fill = Cell_Type)) +  # Add fill = Cell_Type for boxplot
+  geom_boxplot() +
+  geom_jitter(width = 0.4, alpha = 0.5, color = "black") +  # Change jitter color to black or another color
+  labs(x = "Cell Type", y = "Proportion (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = ggsci::pal_igv()(length(unique(proportions_data_long$Cell_Type))))  # Adjust number of colors to match unique Cell Types
+```
+
+# Some summary statsics 
+
+```{r}
+# Calculate statistics for each Cell_Type across all spots
+summary_stats <- proportions_data_long %>%
+  group_by(Cell_Type) %>%
+  summarise(
+    Mean = mean(Proportion, na.rm = TRUE),
+    Median = median(Proportion, na.rm = TRUE),
+    Q25 = quantile(Proportion, 0.25, na.rm = TRUE),
+    Q75 = quantile(Proportion, 0.75, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+print(summary_stats)
+```
+
+## Bar plot for cell porpotions in this sample 
+
+```{r}
+# Load library
+library(ggplot2)
+
+# Assuming 'mat' is your matrix, sum up the columns to get total proportions for each cell type
+total_proportions <- colSums(mat)
+
+# Create a data frame for plotting
+data <- data.frame(CellType = names(total_proportions), Proportion = total_proportions)
+
+# Plotting the single bar plot
+ggplot(data, aes(x = "", y = Proportion, fill = CellType)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Sample", y = "Proportion", fill = "Cell Type") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+
+```
+
+## Cluster based on the cells propotions and assign the cluster names with the most abundant two cell types in each cluster
+
+```{r}
+# Assuming 'matrix_data' is your data matrix
+clusters <- hierarchical_clustering(mat, cluster_by = "rows", k = 15)
+clusters <- data.frame(spots = names(clusters), prop_clusters = clusters)
+clusters <- as.data.frame(mat) %>% rownames_to_column() %>% rename(spots = rowname) %>% left_join(clusters)
+rownames(clusters) <- clusters$spots
+clusters <- clusters[,-1]
+cluster_summaries <- clusters %>%
+    group_by(prop_clusters) %>%
+    summarise(across(everything()[-which(names(clusters) == "prop_clusters")], mean, na.rm = TRUE))
+cluster_summaries
+clusters <- name_clusters(clusters)
+clusters <- rename(clusters, "prop_clusters_lvl1" = "prop_clusters")
+clusters <- rename(clusters, "ClusterName_lvl1" = "ClusterName")
+Data <- AddMetaData(object = Data, clusters)
+length(intersect(rownames(Data@meta.data), rownames(clusters)))
+```
+
+```{r, fig.width=10}
+Idents(Data) <- Data$prop_clusters_lvl1
+SpatialDimPlot(Data, label = FALSE, crop = F) +
+    guides(fill = guide_legend(override.aes = list(size=5))) +
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+DimPlot(Data, group.by = "prop_clusters_lvl1", cols = ggsci::pal_igv()(50), pt.size = 2)
+Idents(Data) <- Data$ClusterName_lvl1
+SpatialDimPlot(Data, label = FALSE, crop = F) +
+    guides(fill = guide_legend(override.aes = list(size=5))) +
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+DimPlot(Data, group.by = "ClusterName_lvl1", cols = ggsci::pal_igv()(50), pt.size = 2)
+```
+
+Look at where each cell type is predicted to be
+
+```{r, fig.width=30, fig.height=10}
+ct <- colnames(Data@meta.data)[str_detect(colnames(Data@meta.data), "lvl1")]
+# remove first and last three values since they are not celltypes 
+ct <- ct[-1]
+ct <- ct[-((length(ct)-2):length(ct))]
+
+# Number of features in 'ct'
+num_features <- length(ct)
+
+# Loop through 'ct' in steps of 4
+for (i in seq(1, num_features, by = 4)) {
+    # Select a subset of 4 features (or fewer if at the end of the list)
+    selected_features <- ct[i:min(i+3, num_features)]
+    
+    # Run SpatialFeaturePlot with the selected features
+    print(SpatialFeaturePlot(
+        Data, crop = FALSE,
+        features = selected_features, ncol = 4,
+        alpha = c(0, 1),
+        max.cutoff = "q95"
+    ) & scale_fill_viridis_c())
+}
+```
+
+```{r, fig.width=20, fig.height=20}
+VlnPlot(Data, features = ct, cols = ggsci::pal_igv()(50))
+```
+
+# Annotation Lvl 2
+
+```{r}
+Idents(se_obj) <- se_obj$all_cells_lvl2
+mgs_lvl2 <- FindAllMarkers(
+    se_obj,
+    only.pos = TRUE,
+    min.pct = 0.5,
+    logfc.threshold = 0.25)
+
+```
+
+```{r}
+"{decon_sp}/{robj_dir}/mgs_lvl2.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = mgs_lvl2)
+```
+
+## Deconvolution Level-1
+
+Run deconvolution
+
+```{r, eval=FALSE}
+res_lvl2 <- SPOTlight(
+    x = se_obj,
+    y = Data,
+    groups = as.character(se_obj$all_cells_lvl2),
+    mgs = mgs_lvl2,
+    hvg = hvg,
+    weight_id = "logFC",
+    group_id = "group",
+    gene_id = "feature")
+
+"{decon_sp}/{robj_dir}/Deconv_se_{Sample}_lvl2.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = res_lvl2, file = .)
+```
+
+```{r, eval=FALSE}
+res_lvl2 <- "{decon_sp}/{robj_dir}/Deconv_se_{Sample}_lvl2.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(file = .)
+```
+
+### Visualization 
+
+First of all we are going to look at the topic profiles to ensure the signatures learnt are specific to each cell type
+
+```{r, fig.width=10, fig.height=10, eval=FALSE}
+mod <- res_lvl2$NMF
+
+# Profiles
+plotTopicProfiles(
+    x = mod,
+    y = se_obj$all_cells_lvl2,
+    facet = FALSE,
+    min_prop = 0.01,
+    ncol = 1) +
+    theme(aspect.ratio = 1)
+
+# Topics
+plotTopicProfiles(
+    x = mod,
+    y = se_obj$all_cells_lvl2,
+    facet = TRUE,
+    min_prop = 0.01,
+    ncol = 6)
+```
+
+Clean up the results by removing those cell types predicted to be < 3% to a spot
+
+# Without Mytiply
+
+```{r, eval=FALSE}
+mat <- res_lvl2$mat
+mat[mat < 0.03] <- 0
+colnames(mat) <- glue("{colnames(mat)}_lvl2")
+Data <- AddMetaData(object = Data, metadata = as.data.frame(mat))
+```
+
+# Visulization 
+
+## Colocalization 
+
+```{r, fig.width=15, fig.height=15, eval=FALSE}
+plotInteractions(mat, which = "heatmap", metric = "prop")
+plotInteractions(mat, which = "heatmap", metric = "jaccard")
+plotInteractions(mat, which = "network")
+```
+
+## Pie chart for the porpotion 
+
+```{r, fig.width=15, fig.height=10, eval=FALSE}
+ct <- colnames(mat)
+mat[mat < 0.1] <- 0
+
+# Define color palette
+# (here we use 'paletteMartin' from the 'colorBlindness' package)
+paletteMartin <- ggsci::pal_igv()(50)
+
+pal <- colorRampPalette(paletteMartin)(length(ct))
+names(pal) <- ct
+
+x <- plotSpatialScatterpie(
+    x = Data,
+    y = mat,
+    cell_types = colnames(mat),
+    img = FALSE,
+    scatterpie_alpha = 1,
+    pie_scale = 0.4) +
+    scale_fill_manual(
+        values = pal,
+        breaks = names(pal)) +
+    scale_y_reverse()
+x
+```
+
+## Identify the most abundant cell type for each spot
+
+```{r, eval=FALSE}
+# Identify the most abundant cell type for each spot
+most_abundant <- apply(mat, 1, function(row) {
+  max_index <- which.max(row)
+  colnames(mat)[max_index]
+})
+# Add the annotations as a new column to the data matrix
+annotated_data_matrix <- data.frame(row.names = rownames(mat), most_abundant_lvl2 = most_abundant)
+Data <- AddMetaData(object = Data, metadata = annotated_data_matrix)
+```
+
+```{r, fig.width=10, fig.height=10, eval=FALSE}
+Idents(Data) <- Data$most_abundant_lvl2
+SpatialDimPlot(Data, label = FALSE) +
+    guides(fill = guide_legend(override.aes = list(size=10))) +
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+```
+
+## Box plot Quantifying cell porpotions in each celltype
+
+```{r, fig.width=15, fig.height=7, eval=FALSE}
+library(ggplot2)
+
+# Assuming your data matrix is named 'proportions_matrix'
+
+# Convert proportions matrix to a data frame for plotting
+proportions_data <- as.data.frame(mat)
+
+# Reshape the data frame into long format for ggplot
+library(reshape2)
+proportions_data_long <- melt(proportions_data, variable.name = "Cell_Type", value.name = "Proportion")
+
+# Create violin plot
+ggplot(proportions_data_long, aes(x = Cell_Type, y = Proportion, fill = Cell_Type)) +  # Add fill = Cell_Type for boxplot
+  geom_boxplot() +
+  geom_jitter(width = 0, alpha = 0.5, color = "black") +  # Change jitter color to black or another color
+  labs(x = "Cell Type", y = "Proportion (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = ggsci::pal_igv()(length(unique(proportions_data_long$Cell_Type))))  # Adjust number of colors to match unique Cell Types
+```
+
+## Bar plot for cell porpotions in this sample 
+
+```{r, eval=FALSE}
+# Load library
+library(ggplot2)
+
+# Assuming 'mat' is your matrix, sum up the columns to get total proportions for each cell type
+total_proportions <- colSums(mat)
+
+# Create a data frame for plotting
+data <- data.frame(CellType = names(total_proportions), Proportion = total_proportions)
+
+# Plotting the single bar plot
+ggplot(data, aes(x = "", y = Proportion, fill = CellType)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Sample", y = "Proportion", fill = "Cell Type") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = ggsci::pal_igv()(50))
+
+```
+
+## Cluster based on the cells propotions and assign the cluster names with the most abundant two cell types in each cluster
+
+```{r, eval=FALSE}
+# Assuming 'matrix_data' is your data matrix
+clusters <- hierarchical_clustering(mat, cluster_by = "rows", k = 15)
+clusters <- data.frame(spots = names(clusters), prop_clusters = clusters)
+clusters <- as.data.frame(mat) %>% rownames_to_column() %>% rename(spots = rowname) %>% left_join(clusters)
+rownames(clusters) <- clusters$spots
+clusters <- clusters[,-1]
+cluster_summaries <- clusters %>%
+    group_by(prop_clusters) %>%
+    summarise(across(everything()[-which(names(clusters) == "prop_clusters")], mean, na.rm = TRUE))
+cluster_summaries
+clusters <- name_clusters(clusters)
+clusters <- rename(clusters, "prop_clusters_lvl2" = "prop_clusters")
+clusters <- rename(clusters, "ClusterName_lvl2" = "ClusterName")
+Data <- AddMetaData(object = Data, clusters)
+length(intersect(rownames(Data@meta.data), rownames(clusters)))
+```
+
+```{r, fig.width=10, eval=FALSE}
+Idents(Data) <- Data$prop_clusters_lvl2
+SpatialDimPlot(Data, label = FALSE, crop = F) +
+    guides(fill = guide_legend(override.aes = list(size=5))) +
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+DimPlot(Data, group.by = "prop_clusters_lvl2", cols = ggsci::pal_igv()(50), pt.size = 2)
+Idents(Data) <- Data$ClusterName_lvl2
+SpatialDimPlot(Data, label = FALSE, crop = F) +
+    guides(fill = guide_legend(override.aes = list(size=5))) +
+    scale_fill_manual(values = ggsci::pal_igv()(50))
+DimPlot(Data, group.by = "ClusterName_lvl2", cols = ggsci::pal_igv()(50), pt.size = 2)
+
+```
+
+Look at where each cell type is predicted to be
+
+```{r, fig.width=30, fig.height=10, eval=FALSE}
+ct <- colnames(Data@meta.data)[str_detect(colnames(Data@meta.data), "lvl2")]
+# remove first and last three values since they are not celltypes 
+ct <- ct[-1]
+ct <- ct[-((length(ct)-2):length(ct))]
+
+# Number of features in 'ct'
+num_features <- length(ct)
+
+# Loop through 'ct' in steps of 4
+for (i in seq(1, num_features, by = 4)) {
+    # Select a subset of 4 features (or fewer if at the end of the list)
+    selected_features <- ct[i:min(i+3, num_features)]
+    
+    # Run SpatialFeaturePlot with the selected features
+    print(SpatialFeaturePlot(
+        Data, crop = FALSE,
+        features = selected_features, ncol = 4,
+        alpha = c(0, 1),
+        max.cutoff = "q95"
+    ) & scale_fill_viridis_c())
+}
+```
+
+```{r, fig.width=20, fig.height=20, eval=FALSE}
+VlnPlot(Data, features = ct, cols = ggsci::pal_igv()(50))
+```
+
+```{r}
+"{decon_sp}/{robj_dir}/Deconv_se_{Sample}.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    saveRDS(object = Data, file = .)
+```
+
+```{r}
+sessionInfo()
+```

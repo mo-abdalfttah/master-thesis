@@ -1,0 +1,632 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "Fig 4 - `r params$Sample`"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+# library(OmnipathR)
+library(stringr)
+library(cowplot)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(reshape2)
+```
+
+```{r}
+two_features_cor <- function(seurat_obj, geneA, geneB) {
+
+  # Extract gene expression data
+  geneA_expr <- FetchData(seurat_obj, vars = geneA)[, 1]
+  geneB_expr <- FetchData(seurat_obj, vars = geneB)[, 1]  
+  # Combine the data into a single data frame
+  expr_data <- data.frame(GeneA = geneA_expr, GeneB = geneB_expr)
+  
+  # Compute the correlation and p-value
+  correlation_test <- cor.test(expr_data$GeneA, expr_data$GeneB, method = "pearson")
+  
+  # Handle the case where p.value is 0
+  p.value <- correlation_test$p.value
+  if (p.value == 0) {
+    p.value <- .Machine$double.eps
+  }
+  
+  # Create a dataframe to store the results
+  cor_results <- data.frame(
+    GeneA = geneA,
+    GeneB = geneB,
+    correlation = correlation_test$estimate,
+    p.value = p.value
+  )
+  
+  # Print the correlation coefficient and p-value
+  print(paste("Correlation coefficient between", geneA, "and", geneB, ":", cor_results$correlation))
+  print(paste("p-value:", cor_results$p.value))
+  
+  # Visualize the correlation
+  p <- ggplot(expr_data, aes(x = GeneA, y = GeneB)) +
+    geom_point() +
+    geom_smooth(method = "lm", col = "blue") +
+    labs(title = paste("Correlation between", geneA, "and", geneB, ":",
+                       round(cor_results$correlation, 2),
+                       "\n p-value:", signif(cor_results$p.value, 2)),
+         x = paste(geneA, "Expression"),
+         y = paste(geneB, "Expression")) +
+    theme_light()
+  
+  print(p)
+}
+
+Signture_HeatMap <- function(object, signture_table, expr_slot, expr_assay, sig_name, sig_assay, 
+                             expr_cols = magma(100), meta_col = NULL) {
+    # Extract Gene Expression Matrix from Seurat Object
+    gene_expr <- GetAssayData(object, assay = expr_assay, slot = expr_slot)
+    # Subset the genes of the signature from the Gene Expression Matrix
+    genes_of_interest <- signture_table$target[which(signture_table$source %in% sig_name)]
+    gene_expr <- gene_expr[rownames(gene_expr) %in% genes_of_interest, ]
+
+    # Extract the Score of the Signature of interest
+    Sig_assay <- GetAssayData(object, assay = sig_assay)
+    Sig <- Sig_assay[sig_name,]
+    anno <- data.frame(Score = Sig)
+    anno$Score[is.infinite(anno$Score)] <- 0
+
+    # Initialize the list for heatmap annotations
+    heatmap_annotations <- list(Score = colorRamp2(c(0, max(anno$Score, na.rm = TRUE)), c("black", "#00F5FF")))
+
+    # Check if meta_col is provided and exists in metadata
+    if (!is.null(meta_col) && meta_col %in% colnames(object@meta.data)) {
+        meta_data <- object@meta.data[, meta_col, drop = FALSE]
+        # Combine the metadata with the annotation
+        anno <- cbind(anno, meta_data)
+
+        # Generate colors for meta_col
+        unique_values <- unique(meta_data[[meta_col]])
+        meta_col_colors <- pal
+        #names(meta_col_colors) <- unique_values
+
+        # Add the meta_col colors to the annotations
+        heatmap_annotations[[meta_col]] <- meta_col_colors
+    }
+
+    # Add the score of the signature as annotation in the heatmap
+    colAnn <- HeatmapAnnotation(df = anno,
+                                which = 'column',
+                                col = heatmap_annotations)
+    
+    # Visualize the Heatmap with the genes and signature
+    ht <- Heatmap(as.matrix(gene_expr),
+                  name = "Gene Expression",
+                  col = expr_cols,
+                  cluster_rows = TRUE,
+                  cluster_columns = TRUE,
+                  column_title = sig_name,
+                  column_names_gp = gpar(fontsize = 15),  # Adjust font size for column names
+                  row_names_gp = gpar(fontsize = 15),  # Adjust font size for row names
+                  column_title_gp = gpar(fontsize = 15),  # Adjust font size for column title
+                  row_title_gp = gpar(fontsize = 15),  # Adjust font size for row title                  
+                  show_column_names = FALSE,
+                  top_annotation = colAnn)
+    draw(ht)
+}
+
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+Sample = "ST.colon1"
+```
+
+# Define Functions
+
+```{r, warning=FALSE, message=FALSE}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+them_plot = theme(
+                text = element_text(size = 8),    
+                title = element_text(size = 8),    
+                axis.title = element_text(size = 8),
+                axis.text = element_text(size = 8), 
+                legend.title = element_text(size = 8),
+                legend.text = element_text(size = 8))
+
+SpatialFeaturePlotBlend <- function(object, features, combine = TRUE,
+                                    feature_1_alt_name = NULL,
+                                    feature_2_alt_name = NULL, assay = NULL,combine_name,
+                                    ...)  {
+  # Convert decimal number to hexadecimal. Pad with 0s if only a single
+  # character following conversion.
+  as_hex <- function(num) {
+    hex_str <- as.character(as.hexmode(num))
+    if (nchar(hex_str) == 1) {
+      hex_str <- paste0("0", hex_str)
+    }
+    
+    return(hex_str)
+  }
+  
+  metadata_to_hexadecimal <- function(in_dat) {
+    apply(in_dat, 2,
+          function(x) {
+            # Make minimum 0
+            x - min(x)
+          }) %>%
+      apply(2,
+            function(x) {
+              # Constrain to range [0, 255]
+              round(255 * (x / max(x)))
+            }) %>%
+      apply(1,
+            function(x) {
+              # Convert to hexadecimal codes
+              toupper(paste0("#", as_hex(x[1]), as_hex(x[2]), "00"))
+            })
+  }
+  
+  if (length(features) != 2) {
+    stop(paste(c("Incorrect number of features. ",
+                 "Requires two features, received ",
+                 length(features))))
+  }
+  
+  if (!is.null(assay)) {
+    DefaultAssay(object) <- assay
+  }
+  
+  blend_plot_theme <- theme(legend.position = "none",
+                            plot.title = element_text(hjust = 0.5))
+  
+  plot_list_outer <- list()
+  
+  object$image_id <- unlist(lapply(Images(object),
+                                   function(x) {
+                                     rep(x, nrow(object[[x]]@coordinates))
+                                   }))
+  
+  
+  for (i in Images(object)) {
+    plot_list <- lapply(features,
+                        function(feature) {
+                          max_color <- ifelse(feature == features[1],
+                                              "#FF0000", "#00FF00")
+                          SpatialFeaturePlot(object, feature,crop = F,
+                                             images = i, ...) +
+                            scale_fill_gradient(low = "#000000",
+                                                high = max_color) +
+                            ggtitle(feature) +
+                            blend_plot_theme
+                        })
+    
+    cells_obj_sub <- subset(object, image_id == i)
+    dat <- FetchData(cells_obj_sub, features)
+    colors <- as.matrix(dat) %>% metadata_to_hexadecimal()
+    
+    #new_md_column <- paste0(features[1], "_vs_", features[2])
+    new_md_column <- combine_name
+    cells_obj_sub[[new_md_column]] <- colors
+    names(colors) <- as.character(colors)
+    Idents(cells_obj_sub) <- cells_obj_sub[[new_md_column]]
+    plot_list[[3]] <- SpatialDimPlot(cells_obj_sub,crop = F,
+                                     cols = colors, images = i, ...) +
+      ggtitle(paste0(features[1], "_", features[2])) +
+      blend_plot_theme + NoLegend()
+    
+    side_length <- 100
+    legend_grid <- expand.grid(seq(from = min(dat[, features[1]]),
+                                   to = max(dat[, features[1]]),
+                                   length.out = side_length),
+                               seq(from = min(dat[, features[2]]),
+                                   to = max(dat[, features[2]]),
+                                   length.out = side_length))
+    colnames(legend_grid) <- features
+    legend_colors <- metadata_to_hexadecimal(legend_grid)
+    legend_grid$color <- legend_colors
+    names(legend_colors) <- legend_colors
+    
+    legend <- ggplot(legend_grid,
+                     aes(x = .data[[features[1]]], y = .data[[features[2]]],
+                         color = color)) +
+      geom_point(shape = 15, size = 1.9) +
+      scale_color_manual(values = legend_colors) +
+      coord_cartesian(expand = FALSE) +
+      theme(legend.position = "none", aspect.ratio = 1,
+            panel.background = element_blank(),
+            axis.text.x = element_text(angle = 45, hjust = 1)) +
+      xlab(ifelse(is.null(feature_1_alt_name),
+                  features[1], feature_1_alt_name)) +
+      ylab(ifelse(is.null(feature_2_alt_name),
+                  features[2], feature_2_alt_name))
+    
+    plot_list[[4]] <- wrap_plots(ggplot() + theme_void(), legend,
+                                 ggplot() + theme_void(), ncol = 1,
+                                 heights = c(0.2, 0.6, 0.2))
+    
+    plot_list_outer[[i]] <- plot_list
+  }
+  
+  if (combine == FALSE) {
+    return(plot_list_outer)
+  } else {
+    plot_list_outer <- lapply(plot_list_outer,
+                              function(p) {
+                                wrap_plots(p, nrow = 1,
+                                           widths = c(0.28, 0.28,
+                                                      0.28, 0.16))
+                              })
+    p <- wrap_plots(plot_list_outer, ncol = 1)
+    
+    return(p)
+  }
+}
+
+
+```
+
+```{r}
+them_plot <- theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    strip.text = element_text(size = 15), # For facet labels
+    plot.caption = element_text(size = 15), # For plot caption if used
+    plot.subtitle = element_text(size = 15) # For plot subtitle if used
+  )
+```
+
+# Read Files
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+```{r}
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        clusters = dplyr::case_when(
+            SCT_snn_res.0.5 == 0 ~ "Cluster 6",
+            SCT_snn_res.0.5 == 1 ~ "Cluster 1",
+            SCT_snn_res.0.5 == 2 ~ "Cluster 2",
+            SCT_snn_res.0.5 == 3 ~ "Cluster 0",
+            SCT_snn_res.0.5 == 4 ~ "Cluster 3",
+            SCT_snn_res.0.5 == 5 ~ "Cluster 5",
+            SCT_snn_res.0.5 == 6 ~ "Cluster 4",
+
+            )
+        )
+
+Data@meta.data <- Data@meta.data %>%
+    dplyr::mutate(
+        annotation_lvl1 = dplyr::case_when(
+            clusters ==  "Cluster 6" ~ "Unknown",
+            clusters ==  "Cluster 1" ~ "Tumor Area 1",
+            clusters ==  "Cluster 2" ~ "Tumor Area 2",
+            clusters ==  "Cluster 0" ~ "Normal-Epithelial",
+            clusters ==  "Cluster 3" ~ "Tumor Area 3",
+            clusters ==  "Cluster 5" ~ "TME",
+            clusters ==  "Cluster 4" ~ "Tumor Area 4",
+
+            )
+        )
+
+Idents(Data) <- factor(Data$annotation_lvl1, levels = c("Normal-Epithelial", "Tumor Area 1", "Tumor Area 2", "Tumor Area 3", "Tumor Area 4", "TME", "Unknown"))
+pal <- c(
+  "Normal-Epithelial" = "#5050FFFF",  # blue
+  "TME" = "#BA6338FF",              # Yellow
+  "Tumor Area 1" = "#CE3D32FF",         # White blue
+  "Tumor Area 2" = "#749B58FF",           # Dark
+  "Tumor Area 3" = "#F0E685FF",           # Green
+  "Tumor Area 4" ="#466983FF",          # Blue
+  "Unknown" = "#5DB1DDFF"            # Red
+)
+
+```
+
+```{r}
+colnames(Data@meta.data)
+```
+
+```{r}
+pdf(file = "figures/Fig_4/01_Strom_deonv.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 5)
+SpatialFeaturePlot(Data, features = c("Strom_lvl1"), alpha = c(0,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA), name = "Stromal") 
+dev.off()
+
+pdf(file = "figures/Fig_4/05_COL1A1.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 5)
+SpatialFeaturePlot(Data, features = c("COL1A1"), alpha = c(-1,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot & scale_fill_viridis_c(option = "C", limits = c(0, NA)) 
+dev.off()
+
+pdf(file = "figures/Fig_4/05_FAP.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 5)
+SpatialFeaturePlot(Data, features = c("FAP"), alpha = c(0,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2)+ them_plot & scale_fill_viridis_c(option = "C", limits = c(0, NA), name = "FAP") 
+dev.off()
+
+pdf(file = "figures/Fig_4/01_TGFb.pdf" %>% here::here() %>% glue::glue(), width = 10, height =5)
+SpatialFeaturePlot(Data, features = c("TGFb"), alpha = c(-1,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot &
+    scale_fill_viridis_c(option = "D", limits = c(0, NA), name = "TGFb") 
+dev.off()
+
+
+pdf(file = "figures/Fig_4/01_TGFb.pdf" %>% here::here() %>% glue::glue(), width = 10, height =5)
+SpatialFeaturePlot(Data, features = c("TGFb"), alpha = c(-1,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot &
+    scale_fill_viridis_c(option = "D", limits = c(0, NA), name = "TGFb")
+dev.off()
+
+```
+
+
+```{r}
+pdf(file = "figures/Fig_4/02_Myeloid_lvl1.pdf" %>% here::here() %>% glue::glue(), width = 10, height =5)
+SpatialFeaturePlot(Data, features = c("Myeloid_lvl1"), alpha = c(0,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA), name = "Myeloid")
+dev.off()
+
+pdf(file = "figures/Fig_4/02_C1QA.pdf" %>% here::here() %>% glue::glue(), width = 10, height =5)
+SpatialFeaturePlot(Data, features = c("C1QA"), alpha = c(0,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot & scale_fill_viridis_c(option = "C", limits = c(0, NA))
+dev.off()
+
+pdf(file = "figures/Fig_4/02_SPP1.pdf" %>% here::here() %>% glue::glue(), width = 10, height =5)
+SpatialFeaturePlot(Data, features = c("SPP1"), alpha = c(0,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot & scale_fill_viridis_c(option = "C", limits = c(0, NA))
+dev.off()
+
+pdf(file = "figures/Fig_4/02_TNFa.pdf" %>% here::here() %>% glue::glue(),width = 10, height =5)
+SpatialFeaturePlot(Data, features = c("TNFa"), alpha = c(-1,1), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) + them_plot &
+    scale_fill_viridis_c(option = "D", limits = c(0, NA), name = "TNFa")
+dev.off()
+
+```
+
+
+```{r}
+pdf(file = "figures/Fig_4/03_FAP_SPP1.pdf" %>% here::here() %>% glue::glue(), width = 10, height = 5)
+SpatialFeaturePlotBlend(object = Data, features = c("magic_SPP1", "magic_FAP"), combine = T, combine_name = "magic_SPP1_vs_magic_FAP") + them_plot
+dev.off()
+```
+
+
+```{r}
+pdf(file = "figures/Fig_4/04_Correlation_TGFB_Sromal.pdf" %>% here::here() %>% glue::glue(), width = 5, height = 5)
+two_features_cor(seurat_obj = Data, geneA = "Strom_lvl1", geneB = "TGFb") + them_plot
+dev.off()
+pdf(file = "figures/Fig_4/04_Correlation_Myeloid.pdf" %>% here::here() %>% glue::glue(), width = 5, height = 5)
+two_features_cor(seurat_obj = Data, geneA = "Myeloid_lvl1", geneB = "TNFa") + them_plot
+dev.off()
+DefaultAssay(Data) <- "MAGIC"
+pdf(file = "figures/Fig_4/04_Correlation_SPP1_FAP.pdf" %>% here::here() %>% glue::glue(), width = 5, height = 5)
+two_features_cor(seurat_obj = Data, geneA = "SPP1", geneB = "FAP") + them_plot
+dev.off()
+```
+
+# CD8 Absence 
+
+```{r}
+DefaultAssay(Data) <- "SCT"
+pdf(file = "figures/Fig_4/06_CD8_deonv.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+SpatialFeaturePlot(Data, features = c("T.CD8_lvl1"), max.cutoff = "q95", crop = F, pt.size.factor = 1.2) &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA))
+dev.off()
+
+pdf(file = "figures/Fig_4/06_CD8A.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+SpatialFeaturePlot(Data, features = c("CD8A"), max.cutoff = "q95", crop = F, pt.size.factor = 1.2)& scale_fill_viridis_c(option = "C", limits = c(0, NA))
+dev.off()
+
+```
+
+```{r}
+se_obj <- "scRNAseq/Final_MSS_Pellka_all_cells.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(file = .)
+```
+
+```{r}
+Analysis = function(obj, res, dim){
+  obj <-  SCTransform(obj, vst.flavor = "v2", verbose = F)
+  #obj <- NormalizeData(obj)
+  #obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  #obj <- ScaleData(obj)
+  obj <- RunPCA(obj, features = VariableFeatures(object = obj), verbose = F)
+  print(ElbowPlot(object = obj, ndims = 50), verbose = F)
+  obj = RunUMAP(object = obj, dims = dim, verbose = F)
+  obj = FindNeighbors(object = obj, dims =  dim, verbose = F)
+  obj = FindClusters(object = obj, resolution = res, verbose = F)
+}
+
+```
+
+```{r}
+png(filename = "figures/Fig_4/UMAP_SPP1_C1QA.png" %>% here::here() %>% glue::glue(), width =1000, height = 400, res = 100)
+FeaturePlot(se_obj, features = c("SPP1", "C1QA"), raster=FALSE, ncol = 2) + them_plot
+dev.off()
+```
+
+```{r}
+macrophage <- subset(se_obj, subset = all_cells_lvl2 %in% "Macrophages")
+```
+
+```{r}
+macrophage <- Analysis(macrophage, res = c(0.1, 0.2, 0.3, 0.4),dim =1:20)
+```
+
+```{r}
+DimPlot(macrophage, group.by = c("SCT_snn_res.0.2"), cols = ggsci::pal_igv()(50),raster = F) + theme(legend.text = element_text(size = 25)) + guides(color = guide_legend(override.aes = list(size = 10)))
+
+```
+
+```{r, fig.height=10, fig.width=10}
+FeaturePlot(macrophage, features = c("SPP1", "C1QA"), max.cutoff = "q95") 
+
+DimPlot(macrophage, group.by = c("SCT_snn_res.0.2"), cols = ggsci::pal_igv()(50),raster = F)
+
+```
+
+```{r}
+macrophage@meta.data <- macrophage@meta.data %>%
+    dplyr::mutate(
+        annotation_macro = dplyr::case_when(
+            SCT_snn_res.0.2 == 0 ~ "TAM C1Q+",
+            SCT_snn_res.0.2 == 1 ~ "TAM SPP1",
+            SCT_snn_res.0.2 == 2 ~ "TAM C1Q+",
+            SCT_snn_res.0.2 == 3 ~ "TAM C1Q+",
+            SCT_snn_res.0.2 == 4 ~ "TAM C1Q+",
+            SCT_snn_res.0.2 == 5 ~ "TAM C1Q+",
+            SCT_snn_res.0.2 == 6 ~ "TAM C1Q+",
+            )
+        )
+```
+
+```{r}
+pdf(file = "figures/Fig_4/07_UMAP_Macro_markers.pdf" %>% here::here() %>% glue::glue(), width =12, height = 4)
+FeaturePlot(macrophage, features = c("SPP1", "C1QA"), max.cutoff = "q95", ncol = 3) +
+  DimPlot(macrophage, group.by = c("annotation_macro"), cols = ggsci::pal_igv()(50),raster = F) + theme(legend.text = element_text(size = 10)) + guides(color = guide_legend(override.aes = list(size = 5))) & them_plot
+dev.off()
+```
+
+# Supplementry
+
+```{r}
+mgs_lvl2 <- "{decon_sp}/{robj_dir}/mgs_lvl2.rds" %>%
+    glue::glue() %>%
+    here::here() %>%
+    readRDS(.)
+mgs_lvl2 <- mgs_lvl2 %>%
+  filter(cluster %in% c("CAF CXCL14+", "Macrophages"))
+mgs_lvl2 <- mgs_lvl2 %>%
+  filter(avg_log2FC > 0.5)
+
+```
+
+```{r}
+Signture <- data.frame(source = mgs_lvl2$cluster, target = mgs_lvl2$gene, weight = mgs_lvl2$avg_log2FC)
+```
+
+```{r}
+acts <- run_wmean(
+    mat=Data@assays$SCT@data,
+    net=Signture,
+    .source='source',
+    .target='target',
+    .mor='weight',
+    times = 100,
+    minsize = 5)
+
+```
+
+```{r}
+Handle_Fun = function(acts_res, object, assay_name){
+  object[[assay_name]] <- acts_res %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+  DefaultAssay(object = object) <- assay_name
+  return(object)
+}
+
+```
+
+
+```{r}
+Data = Handle_Fun(acts_res = acts, object = Data, assay_name = "MacroCAFs")
+```
+
+```{r, fig.width=10}
+DefaultAssay(Data) <- "MacroCAFs"
+pdf(file = "figures/Fig_4/Supp_01_CAFs.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+SpatialFeaturePlot(
+    Data,
+    features = c("CAF CXCL14+"),
+    ncol = 1, 
+    alpha = c(-1, 1),
+    max.cutoff = "q95",
+    crop = F) + them_plot &
+    scale_fill_viridis_c() 
+dev.off()
+pdf(file = "figures/Fig_4/Supp_02_macrophages.pdf" %>% here::here() %>% glue::glue(), width = 15, height = 7)
+SpatialFeaturePlot(
+    Data,
+    features = c("Macrophages"),
+    ncol = 1, 
+    alpha = c(-1, 1),
+    max.cutoff = "q95",
+    crop = F) + them_plot &
+    scale_fill_viridis_c() 
+dev.off()
+```
+
+
+# Heatmap of CAFs and Macrophages
+
+```{r, fig.width=10}
+top_genes <- Signture %>%
+  group_by(source) %>%
+  arrange(desc(weight)) %>%
+  slice_head(n = 25)
+
+library(viridis)
+library(ComplexHeatmap)
+library(circlize)
+pdf(file = "figures/Fig_4/Supp_04_macrophages.pdf" %>% here::here() %>% glue::glue(), width = 8, height =6)
+Signture_HeatMap(object = Data,
+                 signture_table = top_genes,
+                 expr_slot = "scale.data",
+                 expr_assay = "SCT",
+                 expr_cols = magma(100),
+                 sig_name = "Macrophages",
+                 sig_assay = "MacroCAFs",
+                 meta_col = "annotation_lvl1")
+dev.off()
+pdf(file = "figures/Fig_4/Supp_03_CAFs.pdf" %>% here::here() %>% glue::glue(), width = 8, height = 6)
+Signture_HeatMap(object = Data,
+                 signture_table = top_genes,
+                 expr_slot = "scale.data",
+                 expr_assay = "SCT",
+                 expr_cols = magma(100),
+                 sig_name = "CAF CXCL14+",
+                 sig_assay = "MacroCAFs",
+                 meta_col = "annotation_lvl1")
+dev.off()
+```
+
+
+

@@ -1,0 +1,349 @@
+---
+author: "Mohamed Abdalfttah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  Sample: "Default!"
+title: "6.1 a whole story of CRC - `r params$Sample`"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+# Load Libraries
+
+```{r, warning=FALSE, message=FALSE}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+library(RSQLite)
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+library(decoupleR)
+# library(OmnipathR)
+library(stringr)
+library(cowplot)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(viridis)
+library(reshape2)
+```
+
+```{r}
+generate_plots <- function(celltype, pathway_cell_scores) {
+  scores_cors <- lapply(seq_along(celltype), function(i) {
+    pathway_cell_scores %>%
+      group_by(pathway) %>%
+      nest() %>%
+      mutate(cor_res = map(data, function(x) { 
+        stest <- cor.test(x$path_score, x[[celltype[i]]])
+        return(broom::tidy(stest))
+      })) %>% 
+      dplyr::select(-data) %>%
+      unnest(cols = c(cor_res))
+  })
+  
+  scores_cors <- lapply(scores_cors, function(df) {
+    df %>%
+      ungroup() %>%
+      mutate(p.value = ifelse(p.value == 0, min(p.value), p.value)) %>%
+      mutate(corr_p.value = p.adjust(p.value)) %>%
+      mutate(logpvalue = -log10(corr_p.value))
+  })
+  
+  # Assign cell types column 
+  scores_cors <- map2(scores_cors, celltype, ~ mutate(.x, cell_type = .y))
+  
+  for (i in seq_along(scores_cors)) {
+    df <- scores_cors[[i]]
+    cell_type <- celltype[i]
+    
+    plot_title <- paste("Program:", cell_type)
+    
+    plot <- ggplot(df, aes(x = estimate,
+                           y = logpvalue,
+                           label = pathway)) +
+      geom_point() +
+      geom_text_repel() +
+      theme_classic() +
+      xlab("Pearson Correlation") +
+      ylab("-log10(corrected p-value)") +
+      ylim(c(0, 200)) +
+      xlim(-1, 1) +
+      ggtitle(plot_title)
+    
+    print(plot)
+  }
+}
+
+```
+
+```{r}
+Sample <- params$Sample
+```
+
+```{r}
+source(here::here("misc/paths.R"))
+#Sample = "SN123_A595688_Rep1"
+```
+
+# Define Functions
+
+```{r, warning=FALSE, message=FALSE}
+Handle_Fun = function(acts_res, object){
+  object[['pathwmean']] <- acts_res %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+  DefaultAssay(object = object) <- "pathwmean"
+  #object <- ScaleData(object)
+  #object@assays$pathwmean@data <- object@assays$pathwmean@scale.data
+  return(object)
+}
+
+HeatMap = function(object, N_Pathways){
+  df <- t(as.matrix(object@assays$pathwmean@data)) %>%
+    as.data.frame() %>%
+    mutate(cluster = Idents(object)) %>%
+    pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+    group_by(cluster, source) %>%
+    summarise(mean = mean(score))
+  df = df %>% filter(mean != Inf)
+  path <- df %>%
+    group_by(source) %>%
+    summarise(std = sd(mean)) %>%
+    arrange(-abs(std)) %>%
+    head(N_Pathways) %>%
+    pull(source)
+  
+  top_acts_mat <- df %>%
+    filter(source %in% path) %>%
+    pivot_wider(id_cols = 'cluster', names_from = 'source',
+                values_from = 'mean') %>%
+    column_to_rownames('cluster') %>%
+    as.matrix()
+  
+  top_acts_mat[is.na(top_acts_mat)] <- 0
+  palette_length = 100
+  my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+  my_breaks <- c(seq(min(top_acts_mat), 0, length.out=ceiling(palette_length/2) + 1),
+                 seq(0.05, max(top_acts_mat), length.out=floor(palette_length/2)))
+  
+  P1 = pheatmap(t(top_acts_mat), border_color = NA, color=my_color, breaks = my_breaks)
+  return(P1)
+}
+
+
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+```
+
+# Read Files
+
+```{r}
+Data = "{fa_sp}/{robj_dir}/Topics_10_se_{Sample}.rds" %>%
+  glue::glue() %>%
+  here::here() %>%
+    readRDS(.)
+DefaultAssay(Data) = "SCT"
+```
+
+```{r}
+VlnPlot(Data, features = c("EPCAM", "FAP", "DCN"))
+```
+
+```{r, fig.width=20, fig.height=10}
+FeaturePlot(Data, features = c("EPCAM","magic_LGR5", "LGR5", "EMP1", "MKI67"))
+SpatialFeaturePlot(Data, features = c("EPCAM", "LGR5", "EMP1", "MKI67","CPEB4", "C1QC", "C1QB", "C1QA", "DCN", "FAP", "CD1C", "IL3RA"), 
+                   alpha = c(0, 1),
+                   crop = F,
+                   ncol = 6) &
+  scale_fill_viridis_c(option = "mako")
+```
+
+```{r}
+rownames(Data@assays$mouse_sig)
+```
+
+# Normal Niches 
+
+```{r, fig.width=20, fig.height=20}
+DefaultAssay(Data) <- "mouse_sig"
+SpatialFeaturePlot(Data, features = c("Normal.Epi_lvl1","Topic_2","Enteroendocrine-Smillie","Goblet-Smillie", "Enterocytes-Smillie", "Topic_4"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako")
+```
+
+# CMS Classfication 
+
+iCMS3 either MSS or MSI (Mainly MSI)
+iCMS2 is MSS (i2_MSS_F) meaning it is Fibrotic Tumor and the stroaml cells and Fipropblast infiltrated
+
+```{r, fig.width=20, fig.height=5}
+SpatialFeaturePlot(Data, features = c("iCMS2", "iCMS3"),
+                   ncol = 2,
+                   alpha = c(0, 1),
+                   crop = F,pt.size.factor = 1.5,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako")
+```
+
+# Prolifrative Niches 
+
+```{r, fig.width=20, fig.height=20}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("Proliferation", "TP6_lvl2", "MAPK","MKI67", "TOP2A"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA))
+```
+
+# Stem Cell Niches 
+
+```{r, fig.width=20, fig.height=5}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("LGR5-Munoz", "LGR5","magic_LGR5", "TP4_lvl2"),
+                   ncol = 4,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako")
+```
+
+# Diffrentiated Cancers and HRCs
+
+```{r, fig.width=10, fig.height=10}
+DefaultAssay(Data) <- "Spatial"
+SpatialFeaturePlot(Data, features = c("EpiHR-curated", "EpiHR", "CorHRC", "EMP1","magic_EMP1", "TP2_lvl2", "TP3_lvl2"),
+                   ncol = 4,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako")
+
+```
+
+# TME - Stomal and Immune
+
+## Stomal Niches 
+
+```{r, fig.width=15, fig.height=10}
+DefaultAssay(Data) <- "pathwmean"
+SpatialFeaturePlot(Data, features = c("NFkB", "TNFa", "TGFb", "Strom_lvl1", "CAF.CXCL14._lvl2","Topic_5", "YAP-induced-Gregorieff"),
+                   ncol = 4,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako", limits = c(0, NA))
+```
+
+# Immune Niches
+
+```{r, fig.width=15, fig.height=10}
+SpatialFeaturePlot(Data, features = c("JAK-STAT","Topic_1","Myeloid_lvl1", "pDC_lvl2", "Macrophages_lvl2"),
+                   ncol = 3,
+                   alpha = c(0, 1),
+                   crop = F,
+                   max.cutoff = "q99") &
+  scale_fill_viridis_c(option = "mako")
+
+```
+
+```{r, fig.width=10, fig.height=10}
+cell_topic <- t(as.data.frame(Data@assays$mouse_sig@data))
+cell_pathway <- t(as.data.frame(Data@assays$pathwmean@data))
+correlation_spots <- cor(as.data.frame(cell_topic), as.data.frame(cell_pathway))
+pheatmap::pheatmap(correlation_spots, color = rev(magma(50)))
+```
+
+# Correlation Between Signatures and Proginey Pathways
+
+```{r}
+progeny <- as.data.frame(Data@assays$pathwmean@data) %>%
+  rownames_to_column("pathway") %>%
+  pivot_longer(-pathway, 
+               names_to = "cell_type",
+               values_to = "path_score")
+
+signature <- as.data.frame(Data@assays$mouse_sig@data) %>% t() 
+signature <- as.data.frame(signature)                                
+# Extract names of cells
+variable <- colnames(signature)
+signature <-  signature %>% rownames_to_column("cell_type")
+```
+
+```{r}
+merged_scores <- left_join(progeny, signature)
+head(merged_scores)
+```
+
+```{r}
+generate_plots(celltype = variable, pathway_cell_scores = merged_scores)
+```
+
+# Correlation between Signatures and Deconvloution 
+
+```{r}
+ct <- colnames(Data@meta.data)[str_detect(colnames(Data@meta.data), "lvl2")]
+deconv <- Data@meta.data %>% select(all_of(ct))
+deconv$cell_type <- rownames(deconv)
+deconv <- melt(deconv, id.vars = "cell_type")
+colnames(deconv) <- c("cell_type", "pathway", "path_score")
+```
+
+```{r}
+merged_scores <- left_join(signature, deconv)
+head(merged_scores)
+```
+
+```{r}
+generate_plots(celltype = variable, pathway_cell_scores = merged_scores)
+```
+
+# Correlation between Progieny pathways and Deconvloution 
+
+```{r}
+progeny <- as.data.frame(Data@assays$pathwmean@data) %>% t() 
+progeny <- as.data.frame(progeny)                                
+# Extract names of cells
+variable <- colnames(progeny)
+progeny <-  progeny %>% rownames_to_column("cell_type")
+
+merged_scores <- left_join(progeny, deconv)
+head(merged_scores)
+```
+
+```{r}
+generate_plots(celltype = variable, pathway_cell_scores = merged_scores)
+```
+
+```{r}
+sessionInfo()
+```
+

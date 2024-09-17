@@ -1,0 +1,224 @@
+---
+title: "Merge Epithilial with TME Pelka"
+author: "Mohmed Abdalfttah"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+Analysis = function(obj, res, dim){
+  obj <-  SCTransform(obj, vst.flavor = "v2", verbose = TRUE)
+  #obj <- NormalizeData(obj)
+  #obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  #obj <- ScaleData(obj)
+  obj <- RunPCA(obj, features = VariableFeatures(object = obj))
+  print(ElbowPlot(object = obj, ndims = 50))
+  obj = RunUMAP(object = obj, dims = dim, verbose = F)
+  obj = FindNeighbors(object = obj, dims =  dim, verbose = F)
+  obj = FindClusters(object = obj, resolution = res, verbose = F)
+}
+
+```
+
+## Libraries
+
+```{r}
+library(Seurat)
+library(cowplot)
+library(tidyverse)
+library(glue)
+library(here)
+```
+
+## Setting parameters
+Loading necessary paths and parameters
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+se_obj_tme <- "{annot_tme}/{robj_dir}/Final_Annotation.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(.)
+```
+
+```{r}
+se_obj_epi <- "scRNAseq/Cancer/MSS_Pellka_Epi_cells.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(.)
+```
+
+```{r}
+table(se_obj_epi$ClusterMidway)
+```
+
+# Add metadata to the epithilia 
+
+```{r}
+metadata <- "scRNAseq/Cancer/Level3_Annotation_cancer_cells.csv" %>%
+  here::here() %>%
+  glue::glue() %>%
+  read.csv(.)
+rownames(metadata) <- metadata$X
+metadata <- metadata[-1]
+```
+
+```{r}
+se_obj_epi <- AddMetaData(se_obj_epi, metadata = metadata)
+```
+
+# Deal with the different metadata
+
+```{r}
+se_obj <- merge(se_obj_epi, se_obj_tme)
+```
+
+```{r}
+table(se_obj$MMRStatus, se_obj$ClusterMidway)
+```
+
+```{r}
+# Assuming your dataframe is called df
+se_obj@meta.data <- se_obj@meta.data %>%
+  mutate(all_cells_lvl2 = case_when(
+    ClusterTop == "Epi" & !is.na(AnnotationI) ~ as.character(AnnotationI),  # If column1 is 'epi' and column2 is not NA, assign column2's value
+    ClusterTop == "Epi" & is.na(AnnotationI) ~ "Normal Epi",            # If column1 is 'epi' but column2 is NA, assign 'Normal epi'
+    ClusterTop != "Epi" ~ as.character(final_annot),             # If column1 is not 'epi', use 'annotationlvl1'
+    TRUE ~ "Normal Epi"                                       # Else, assign NA
+  ))
+```
+
+```{r}
+table(se_obj$all_cells_lvl2)
+```
+
+```{r}
+se_obj <- subset(se_obj, all_cells_lvl2 %in% "Low", invert = T)
+se_obj
+```
+
+```{r}
+"scRNAseq/MSS_Pellka_epin_epit_tme.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  saveRDS(object = se_obj)
+```
+
+```{r}
+se_obj <- "scRNAseq/MSS_Pellka_epin_epit_tme.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(.)
+```
+
+# Quality Control 
+
+```{r, fig.width=15}
+se_obj$project.name <- "SeuratProject"
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+se_obj[["percent.mt"]] <- PercentageFeatureSet(se_obj, pattern = "^MT-")
+se_obj[["percent.rb"]] <- PercentageFeatureSet(se_obj, pattern = "^RP[SL]")
+
+```
+
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(se_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by = "project.name")
+VlnPlot(se_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.rb"), ncol = 3, group.by = "project.name")
+
+plot1 <- FeatureScatter(se_obj, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = "project.name")
+plot2 <- FeatureScatter(se_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "project.name")
+plot1 + plot2
+
+```
+
+
+```{r, fig.width=20, fig.height=10}
+# Visualize QC metrics as a violin plot
+VlnPlot(se_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by = "orig.ident")
+VlnPlot(se_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.rb"), ncol = 3, group.by = "orig.ident")
+
+plot1 <- FeatureScatter(se_obj, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = "orig.ident")
+plot2 <- FeatureScatter(se_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "orig.ident")
+plot1 + plot2
+```
+
+# Filter Mito and ribosomal genes
+```{r}
+se_obj <- se_obj[!grepl("^MT-", rownames(se_obj)), ]
+se_obj <- se_obj[ ! grepl('^RP[SL]', rownames(se_obj)), ]
+```
+
+# Add some metadata
+
+```{r}
+se_obj$Survival <- 'Alive'
+se_obj$Metastasis <- 'No'
+```
+
+```{r}
+gc()
+```
+
+```{r}
+se_obj <- Analysis(obj = se_obj, res = 0.2, dim = 1:30)
+```
+
+```{r}
+gc()
+```
+
+SpecimenType: Normal and Tumor
+
+TumorStage: In cancer staging, "T4" refers to the size and/or extent of the primary tumor. The "T" in T4 stands for "tumor," and the "4" indicates a relatively advanced stage.
+
+Grade: high >> T4, Low >> not T4
+
+LymphNodeStatus: N+ (Positive Lymph Node Status): This indicates that cancer cells have spread to nearby lymph nodes. N- (Negative Lymph Node Status): This means that no cancer cells were found in the sampled lymph nodes.
+
+
+```{r, fig.width= 20, fig.height=10}
+colnames(se_obj@meta.data)
+DimPlot(se_obj, group.by = c("SpecimenType", "Hospital", "ProcessingMethod", "Sex", "Side", "Grade", "TumorStage", "LymphNodeStatus", "MMRStatus", "MMRMLH1", "DiseaseOntology"), cols = ggsci::pal_igv()(50),raster = F)
+```
+
+```{r, fig.width=20, fig.height=10}
+DimPlot(se_obj, group.by = c("Patient"), ncol = 1, cols = c(ggsci::pal_igv()(50), ggsci::pal_uchicago(palette = "light")(6), ggsci::pal_uchicago(palette = "dark")(6)),raster = F)
+```
+
+```{r, fig.width=10, fig.height=10}
+se_obj@meta.data$ClusterTop[is.na(se_obj@meta.data$ClusterTop)] <- "Normal Epi"
+DimPlot(se_obj, group.by = c("ClusterTop"), cols = ggsci::pal_igv()(50),raster = F)
+se_obj@meta.data$ClusterMidway[is.na(se_obj@meta.data$ClusterMidway)] <- "Normal Epi"
+DimPlot(se_obj, group.by = c("ClusterMidway"), cols = ggsci::pal_igv()(50),raster = F)
+```
+
+```{r, fig.width=10, fig.height=10}
+DimPlot(se_obj, group.by = c("all_cells_lvl2"), cols = c(ggsci::pal_igv()(50), ggsci::pal_uchicago()(10)),raster = F, label = T)
+```
+
+```{r}
+"scRNAseq/MSS_Pellka_epin_epit_tme_processed.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  saveRDS(object = se_obj)
+```
+
+```{r}
+sessionInfo()
+```

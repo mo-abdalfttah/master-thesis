@@ -1,0 +1,94 @@
+---
+title: "QC TME Pilka"
+author: "Mohmed Abdalfttah"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message = FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+Analysis = function(obj, res, dim){
+  obj <-  SCTransform(obj, vst.flavor = "v2", verbose = TRUE, vars.to.regress = c("percent.mt"))
+  #obj <- NormalizeData(obj)
+  #obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  #obj <- ScaleData(obj)
+  obj <- RunPCA(obj, features = VariableFeatures(object = obj))
+  print(ElbowPlot(object = obj, ndims = 50))
+  obj = RunUMAP(object = obj, dims = dim, verbose = F)
+  obj = FindNeighbors(object = obj, dims =  dim, verbose = F)
+  obj = FindClusters(object = obj, resolution = res, verbose = F)
+}
+```
+
+
+
+
+## Libraries
+
+```{r}
+library(Seurat)
+library(cowplot)
+library(tidyverse)
+library(glue)
+library(here)
+```
+
+```{r}
+them_plot <- theme(
+  plot.title = element_text(size = 8),
+  axis.title.x = element_text(size = 8),
+  axis.title.y = element_text(size = 8),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  legend.title = element_text(size = 8),
+  legend.text = element_text(size = 8))
+
+```
+
+## Setting parameters
+Loading necessary paths and parameters
+```{r}
+source(here::here("misc/paths.R"))
+```
+
+```{r}
+se_obj <- "{qc_sc_tme}/{robj_dir}/MSS_Pellka.rds" %>%
+  here::here() %>%
+  glue::glue() %>%
+  readRDS(.)
+```
+
+```{r, fig.width=20, fig.height=10}
+DimPlot(se_obj, cols=ggsci::pal_igv()(50), group.by = c("SCT_snn_res.0.2", "PatientTypeID", "ClusterTop", "ClusterMidway"), ncol = 2) &
+  them_plot
+```
+
+# Save Main Cell types to annotate them 
+
+```{r}
+cells <- unique(se_obj$ClusterTop)
+for (i in seq_along(cells)) {
+  obj <- subset(se_obj, subset = ClusterTop %in% cells[i])
+  "{annot_tme}/{robj_dir}/{cells[i]}_obj.rds" %>%
+    here::here() %>%
+    glue::glue() %>%
+    saveRDS(object = obj)
+}
+```
+
+```{r}
+sessionInfo()
+```
+
